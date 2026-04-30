@@ -1,0 +1,67 @@
+# Environment files
+.env
+.env.local
+.env.*.local
+*.env
+!hf_job_final.env
+
+# Virtual environments
+venv/
+venv311/
+ENV/
+env/
+
+# Nested folders
+mlops-incident-env/
+
+# IDE and Tools
+.vscode/local
+.sixth/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Credentials and secrets
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
+.credentials
+credentials.json
+
+# Build and dist
+build/
+dist/
+*.egg-info/
+
+# Logs
+*.log
+logs/
+
+# Local notes and job artifacts
+imp files/
+md files/
+hf_jobs_ps.txt
+hf_job_last_submit.txt
+hf_job_a10g_small_submit.txt

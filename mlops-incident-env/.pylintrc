@@ -1,0 +1,89 @@
+[MASTER]
+jobs=1
+limit-inference-results=100
+persistent=yes
+suggestion-mode=yes
+unsafe-load-any-extension=no
+
+[MESSAGES CONTROL]
+disable=
+    missing-docstring,
+    invalid-name,
+    too-many-arguments,
+    protected-access,
+    unused-import,
+    redefined-builtin,
+    too-few-public-methods,
+    too-many-instance-attributes,
+
+[REPORTS]
+output-format=text
+reports=no
+
+[FORMAT]
+max-line-length=99
+indent-string='    '
+indent-after-paren=4
+
+[VARIABLES]
+additional-builtins=
+allow-global-unused-variables=yes
+ignored-argument-names=_.*|^ignored_|^unused_
+
+[DESIGN]
+max-attributes=10
+max-bool-expr=5
+max-branches=12
+max-locals=15
+max-parents=7
+max-public-methods=20
+max-returns=6
+max-statements=50
+min-public-methods=1
+
+[BASIC]
+bad-names=foo,bar,baz,toto,tutu,tata
+good-names=i,j,k,ex,Run,_
+include-naming-hint=no
+name-group=
+property-classes=abc.abstractproperty
+
+[SIMILARITIES]
+ignore-comments=yes
+ignore-docstrings=yes
+ignore-imports=yes
+min-similarity-lines=4
+
+[SPELLING]
+load-plugins=pylint_django
+spelling-dict=en_US
+spelling-ignore-words=
+
+[LOGGING]
+logging-format-style=old
+logging-modules=logging
+
+[TYPECHECK]
+contextmanager-decorators=contextlib.contextmanager
+generated-members=
+ignore-mixin-members=yes
+ignored-classes=optparse.Values,thread._local,_thread._local
+ignored-modules=
+missing-member-hint=yes
+missing-member-hint-distance=1
+missing-member-max-choices=1
+
+[CLASSES]
+check-protected-access-in-special-methods=yes
+exclude-protected=_asdict,_fields,_make,_replace,__slots__
+defining-attr-methods=__init__,__new__,setUp,__post_init__
+valid-classmethod-first-arg=cls
+valid-metaclass-first-arg=mcs
+
+[IMPORTS]
+allow-wildcard-with-all=no
+analyse-fallback-blocks=no
+deprecated-modules=optparse,tkinter.tix
+
+[EXCEPTIONS]
+overgeneral-exceptions=builtins.BaseException,builtins.Exception

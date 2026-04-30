@@ -1,0 +1,178 @@
+{
+  "goal": "Three ML services degraded simultaneously 2 hours after deployment v7.8.2. Model accuracy -22%, revenue impact 50K/hr. Find ALL root causes.",
+  "alert_summary": "Multi-system failure: embedding_service_v3 errors +450%, feature_store cache miss 100%, ab_test_router sending 100% traffic to untested model_B. Deploy v7.8.2 2h ago.",
+  "root_cause": "cascade_failure_deployment_v7.8.2",
+  "root_cause_keywords": [
+    "embedding",
+    "onnx",
+    "cache",
+    "ttl",
+    "ab_test_router",
+    "rollback"
+  ],
+  "sla_minutes": 20,
+  "sla_steps": 15,
+  "global_metrics": {
+    "model_accuracy_delta": "-22%",
+    "revenue_impact": "-50K/hr",
+    "services_degraded": 3
+  },
+  "components": {
+    "embedding_service_v3": {
+      "status": "CRITICAL",
+      "description": "Embedding service. ONNX Runtime version mismatch after v7.8.2 deploy.",
+      "last_updated": "2024-01-15 14:02:00 UTC",
+      "logs": [
+        {
+          "time": "14:05:11",
+          "level": "ERROR",
+          "msg": "ONNX Runtime version mismatch: expected 1.15, found 1.18. Embedding vectors corrupted."
+        },
+        {
+          "time": "14:07:33",
+          "level": "CRITICAL",
+          "msg": "cosine similarity avg dropped from 0.82 to 0.11 - all embeddings corrupted"
+        }
+      ],
+      "metrics": {
+        "onnx_runtime_version": "1.18 (expected: 1.15)",
+        "error_rate": "67%",
+        "embedding_quality": 0.11
+      }
+    },
+    "feature_store": {
+      "status": "CRITICAL",
+      "description": "Central feature store. Cache TTL set to 0s by v7.8.2 - serving stale features to ALL models.",
+      "last_updated": "2024-01-15 14:02:30 UTC",
+      "logs": [
+        {
+          "time": "14:03:01",
+          "level": "CRITICAL",
+          "msg": "Cache TTL=0s: all entries expiring instantly. Stale features being served."
+        },
+        {
+          "time": "14:06:15",
+          "level": "ERROR",
+          "msg": "Feature freshness violation: features aged 202 minutes served to model_serving"
+        }
+      ],
+      "metrics": {
+        "cache_ttl_seconds": 0,
+        "cache_hit_rate": "0%",
+        "feature_staleness_minutes": 202
+      }
+    },
+    "ab_test_router": {
+      "status": "DEGRADED",
+      "description": "AB test router. Config corrupted by v7.8.2 - routing 100% traffic to untested model_B.",
+      "last_updated": "2024-01-15 14:01:45 UTC",
+      "logs": [
+        {
+          "time": "14:02:10",
+          "level": "WARNING",
+          "msg": "Traffic split: model_A=0%, model_B=100%. Source: deployment_v7.8.2_routing.yaml"
+        },
+        {
+          "time": "14:08:30",
+          "level": "CRITICAL",
+          "msg": "model_B timeout rate 23% under full traffic. Routing config corrupted."
+        }
+      ],
+      "metrics": {
+        "model_a_traffic_pct": 0,
+        "model_b_traffic_pct": 100,
+        "model_b_timeout_rate": "23%"
+      }
+    },
+    "model_server": {
+      "status": "DEGRADED",
+      "description": "Model serving. Degraded due to upstream failures.",
+      "last_updated": "2024-01-15 14:00:00 UTC",
+      "logs": [
+        {
+          "time": "14:10:00",
+          "level": "WARNING",
+          "msg": "Accuracy below threshold. Multiple upstream issues."
+        }
+      ],
+      "metrics": {
+        "accuracy_delta": "-22%",
+        "p99_latency_ms": 1240
+      }
+    },
+    "data_pipeline_b": {
+      "status": "OK",
+      "description": "Batch pipeline. Running normally. NOT related. Red herring.",
+      "last_updated": "2024-01-15 10:00:00 UTC",
+      "logs": [],
+      "metrics": {
+        "status": "healthy"
+      }
+    },
+    "api_gateway": {
+      "status": "OK",
+      "description": "API gateway. Operating normally. NOT involved. Red herring.",
+      "last_updated": "2024-01-15 12:00:00 UTC",
+      "logs": [],
+      "metrics": {
+        "error_rate": "0.1%"
+      }
+    }
+  },
+  "config_diff": {
+    "service": "embedding_service_v3",
+    "deployment_time": "2024-01-15 14:00:00 UTC",
+    "author": "ci-cd-bot",
+    "pr_title": "chore: bump onnx-runtime, reset cache TTL, update ab routing",
+    "previous_config": {
+      "onnx_runtime_version": "1.15",
+      "cache_ttl_seconds": 300,
+      "ab_traffic_split": "model_A=90%,model_B=10%"
+    },
+    "current_config": {
+      "onnx_runtime_version": "1.18",
+      "cache_ttl_seconds": 0,
+      "ab_traffic_split": "model_A=0%,model_B=100%"
+    },
+    "note": "Three config changes in one PR v7.8.2 caused cascading failures."
+  },
+  "feature_drift_data": {
+    "summary": "All features critically stale due to cache_ttl=0 in feature_store.",
+    "features": {
+      "user_engagement_score": {
+        "psi": 0.61,
+        "status": "CRITICAL_DRIFT"
+      },
+      "click_through_rate": {
+        "psi": 0.54,
+        "status": "CRITICAL_DRIFT"
+      }
+    },
+    "model_feature_importance": {
+      "user_engagement_score": 0.42,
+      "click_through_rate": 0.31
+    }
+  },
+  "reward_config": {
+    "relevant_components": [
+      "embedding_service_v3",
+      "feature_store",
+      "ab_test_router"
+    ],
+    "key_evidence_logs": [
+      "embedding_service_v3",
+      "feature_store",
+      "ab_test_router"
+    ],
+    "explore_relevant_reward": 0.05,
+    "find_key_evidence_reward": 0.1,
+    "find_config_diff_reward": 0.15,
+    "find_feature_drift_reward": 0.15,
+    "find_critical_feature_reward": 0.2,
+    "correct_diagnosis_reward": 0.5,
+    "partial_diagnosis_reward": 0.25,
+    "false_diagnosis_penalty": -0.1,
+    "loop_penalty": -0.1,
+    "step_over_max_penalty": -0.05
+  }
+}

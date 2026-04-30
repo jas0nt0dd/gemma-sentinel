@@ -1,0 +1,154 @@
+{
+  "task_id": "hard",
+  "scenario_name": "Silent Model Drift",
+  "goal": "Revenue has dropped 12% over the past 3 days. No error alerts. No system failures. All services appear healthy. Investigate the ML system for silent degradation. You must: (1) identify which feature(s) have drifted, (2) explain why the model is underperforming, (3) provide a remediation plan. Use: inspect, query_logs, check_metrics, check_feature_drift, compare_configs, submit_diagnosis.",
+  "alert_summary": "[BUSINESS] Revenue anomaly detected by finance team. 3-day revenue drop: -12.3%. No engineering alerts. Escalated manually to ML on-call. Current time: 10:00 UTC, Day 3.",
+  "max_steps": 25,
+  "components": {
+    "api_gateway": {
+      "status": "healthy",
+      "description": "All routes healthy. Request volume stable.",
+      "logs": [{"time": "10:00 UTC", "level": "INFO", "msg": "All systems nominal. Request rate: 2,100 req/s."}],
+      "metrics": {"request_rate": 2100, "error_rate": 0.0, "p99_latency_ms": 62}
+    },
+    "feature_store": {
+      "status": "healthy",
+      "description": "Pre-computes 8 features for the recommendation model. All features updating normally.",
+      "logs": [
+        {"time": "10:00 UTC", "level": "INFO", "msg": "All 8 feature pipelines running. No schema errors. No null anomalies."}
+      ],
+      "metrics": {"null_rate": 0.001, "schema_violations": 0, "batch_success_rate": 1.0}
+    },
+    "model_server": {
+      "status": "healthy",
+      "description": "Serves recommendation model v4.2. Trained 60 days ago. No errors. Predictions are being made successfully.",
+      "logs": [
+        {"time": "10:00 UTC", "level": "INFO", "msg": "Model v4.2 serving normally. 0 errors. Uptime 99.99%."},
+        {"time": "09:50 UTC", "level": "INFO", "msg": "Model last retrained: 60 days ago. Retraining pipeline: IDLE."}
+      ],
+      "metrics": {
+        "model_version": "v4.2",
+        "model_trained_days_ago": 60,
+        "error_rate": 0.0,
+        "p99_latency_ms": 58,
+        "last_retrain": "60 days ago"
+      }
+    },
+    "training_pipeline": {
+      "status": "healthy",
+      "description": "Automated retraining pipeline. Configured to retrain when PSI > 0.20. Last run: 60 days ago.",
+      "logs": [
+        {"time": "Day -60", "level": "INFO", "msg": "Retraining complete. Model v4.2 deployed."},
+        {"time": "Day -3", "level": "INFO", "msg": "PSI check scheduled but not yet run (weekly cadence, next run in 4 days)."}
+      ],
+      "metrics": {
+        "last_run_days_ago": 60,
+        "next_scheduled_run_days": 4,
+        "psi_check_cadence": "weekly",
+        "trigger_threshold_psi": 0.20
+      }
+    },
+    "monitoring_service": {
+      "status": "healthy",
+      "description": "Monitors error rates, latency, and system health. Does NOT track feature drift or business KPIs. No alerts fired.",
+      "logs": [
+        {"time": "10:00 UTC", "level": "INFO", "msg": "All monitored metrics within normal bounds. No alerts."},
+        {"time": "10:00 UTC", "level": "INFO", "msg": "NOTE: Feature drift monitoring disabled — config flag 'enable_psi_alerting=false'."}
+      ],
+      "metrics": {"alerts_fired_last_7d": 0, "psi_alerting_enabled": false}
+    },
+    "ab_testing_service": {
+      "status": "healthy",
+      "description": "Runs A/B experiments. New UI redesign (Experiment #A441) launched 3 days ago. Affects 100% of users.",
+      "logs": [
+        {"time": "Day -3, 00:00 UTC", "level": "INFO", "msg": "Experiment #A441 launched: New UI redesign rolled out to 100% of users. Feature: Redesigned home feed layout."},
+        {"time": "Day -3, 06:00 UTC", "level": "INFO", "msg": "Experiment #A441: User engagement patterns shifting. Session time down 8%, scroll depth down 15%."},
+        {"time": "Day -2, 10:00 UTC", "level": "INFO", "msg": "Experiment #A441: Click-through rate on recommendations down 11%. Engagement score distribution changed."}
+      ],
+      "metrics": {
+        "experiment_a441_status": "running",
+        "experiment_a441_start": "3 days ago",
+        "session_time_delta": -0.08,
+        "scroll_depth_delta": -0.15,
+        "ctr_delta": -0.11
+      }
+    }
+  },
+  "feature_drift_data": {
+    "summary": "Population Stability Index (PSI) scores for all 8 model features. PSI > 0.20 = significant drift. PSI > 0.25 = critical drift. Comparison: training distribution (60 days ago) vs current serving distribution.",
+    "features": {
+      "user_age_bucket": {"psi": 0.02, "status": "stable", "note": "No change."},
+      "purchase_frequency_30d": {"psi": 0.04, "status": "stable", "note": "Normal seasonal variation."},
+      "avg_order_value": {"psi": 0.03, "status": "stable", "note": "No change."},
+      "device_type": {"psi": 0.01, "status": "stable", "note": "No change."},
+      "user_engagement_score": {
+        "psi": 0.38,
+        "status": "CRITICAL_DRIFT",
+        "note": "Training distribution: mean=0.72, std=0.12. Current distribution: mean=0.51, std=0.21. Score dropped significantly 3 days ago — coincides with UI redesign launch. This is the #1 feature by SHAP importance (weight: 0.34).",
+        "training_stats": {"mean": 0.72, "std": 0.12, "p10": 0.55, "p90": 0.88},
+        "current_stats": {"mean": 0.51, "std": 0.21, "p10": 0.22, "p90": 0.79}
+      },
+      "geo_region": {"psi": 0.03, "status": "stable", "note": "No change."},
+      "category_affinity_score": {"psi": 0.09, "status": "minor_drift", "note": "Minor drift, within acceptable range."},
+      "recency_days_since_last_purchase": {"psi": 0.06, "status": "stable", "note": "No change."}
+    },
+    "model_feature_importance": {
+      "user_engagement_score": 0.34,
+      "purchase_frequency_30d": 0.22,
+      "avg_order_value": 0.18,
+      "category_affinity_score": 0.11,
+      "recency_days_since_last_purchase": 0.08,
+      "user_age_bucket": 0.04,
+      "device_type": 0.02,
+      "geo_region": 0.01
+    }
+  },
+  "business_metrics": {
+    "revenue": {
+      "day_minus_7": 1000000,
+      "day_minus_6": 998000,
+      "day_minus_5": 1002000,
+      "day_minus_4": 999000,
+      "day_minus_3": 987000,
+      "day_minus_2": 889000,
+      "day_minus_1": 876000,
+      "today": 877000,
+      "pct_change_3d": -12.3
+    },
+    "recommendation_ctr": {
+      "day_minus_4": 0.087,
+      "day_minus_3": 0.085,
+      "day_minus_2": 0.076,
+      "day_minus_1": 0.071,
+      "today": 0.069
+    }
+  },
+  "root_cause": "user_engagement_score_drift_model_staleness_60_days",
+  "root_cause_keywords": [
+    "user_engagement_score", "drift", "psi", "model_stale", "retrain", "ui_redesign", "60_days"
+  ],
+  "grader": {
+    "type": "partial_score",
+    "scoring": {
+      "identifies_user_engagement_score_drift": 0.35,
+      "mentions_psi_or_distribution_shift": 0.15,
+      "connects_to_ui_redesign_or_experiment": 0.15,
+      "mentions_model_staleness_or_60_days": 0.20,
+      "provides_remediation_retrain": 0.15
+    }
+  },
+  "reward_config": {
+    "relevant_components": ["model_server", "training_pipeline", "ab_testing_service", "monitoring_service"],
+    "key_evidence_drift": ["user_engagement_score"],
+    "key_evidence_business": "business_metrics",
+    "explore_relevant_reward": 0.04,
+    "find_feature_drift_reward": 0.15,
+    "find_critical_feature_reward": 0.20,
+    "find_business_metrics_reward": 0.10,
+    "find_ab_test_connection_reward": 0.10,
+    "correct_diagnosis_reward": 0.40,
+    "partial_diagnosis_reward": 0.20,
+    "loop_penalty": -0.10,
+    "false_diagnosis_penalty": -0.08
+  }
+}

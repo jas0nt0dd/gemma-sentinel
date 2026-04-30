@@ -1,0 +1,89 @@
+name: mlops-incident-env
+version: 2.0.0
+description: >
+  A production-grade RL environment where AI agents act as on-call ML engineers,
+  diagnosing and resolving real-world machine learning system incidents.
+  Tasks range from simple data quality alerts (Easy) to multi-root-cause
+  cascade failures requiring cross-system synthesis (Cascade/Elite).
+  Built for META x PyTorch OpenEnv Hackathon 2.0.
+
+author: jason9150
+homepage: https://huggingface.co/spaces/jason9150/mlops-incident-env
+license: MIT
+
+tags:
+  - mlops
+  - production
+  - incident-response
+  - real-world
+  - model-monitoring
+  - reward-shaping
+  - process-gated-scoring
+
+tasks:
+  - id: easy
+    name: Data Quality Alert
+    difficulty: easy
+    max_steps: 10
+    description: >
+      Model accuracy dropped 18% in 2 hours. SLA breach in 30 minutes.
+      Find the data pipeline responsible. Rewarded for efficient, targeted investigation.
+    scoring:
+      max_score: 1.0
+      dimensions:
+        - component_identification: 0.40
+        - root_cause_depth: 0.20
+        - investigation_quality: 0.25
+        - efficiency_bonus: 0.15
+
+  - id: medium
+    name: Latency Spike Investigation
+    difficulty: medium
+    max_steps: 15
+    description: >
+      P99 inference latency spiked from 45ms to 847ms. 23% of requests timing out.
+      Identify the bottleneck component and the configuration change that caused it.
+      Config comparison is essential — use compareconfigs.
+    scoring:
+      max_score: 1.0
+      dimensions:
+        - component_identification: 0.40
+        - config_root_cause: 0.35
+        - fix_quality: 0.15
+        - investigation_process: 0.10
+
+  - id: hard
+    name: Silent Model Drift
+    difficulty: hard
+    max_steps: 25
+    description: >
+      Revenue dropped 12% over 3 days. No error alerts. No obvious failures.
+      Detect feature distribution shift causing silent model degradation.
+      Requires checkfeaturedrift action and full remediation plan with retraining strategy.
+    scoring:
+      max_score: 1.0
+      dimensions:
+        - drift_identification: 0.30
+        - root_cause_chain: 0.30
+        - business_impact: 0.15
+        - remediation_plan: 0.15
+        - investigation_depth: 0.10
+
+  - id: cascade
+    name: Cascade Failure (Elite)
+    difficulty: elite
+    max_steps: 30
+    description: >
+      Three simultaneous failures post-deployment v7.8.2. Embedding service ONNX mismatch,
+      feature store cache TTL corruption, and AB router traffic split error — all from
+      one bad deployment. Agent must identify ALL THREE root causes and synthesize a
+      coordinated rollback plan. Partial score capped at 0.35 if only 1 cause found.
+    scoring:
+      max_score: 1.0
+      dimensions:
+        - identifies_embedding_issue: 0.20
+        - identifies_feature_cache_issue: 0.20
+        - identifies_ab_router_issue: 0.20
+        - synthesis_single_deployment: 0.15
+        - coordinated_remediation: 0.15
+        - investigation_breadth: 0.10

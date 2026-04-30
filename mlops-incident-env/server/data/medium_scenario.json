@@ -1,0 +1,124 @@
+{
+  "task_id": "medium",
+  "scenario_name": "Latency Spike Investigation",
+  "goal": "P99 inference latency spiked from 45ms to 847ms. 23% of requests are timing out. SLA is 200ms. A deployment was made today. Identify the bottleneck component AND the specific configuration change responsible. Use: inspect, query_logs, check_metrics, compare_configs, submit_diagnosis.",
+  "alert_summary": "[CRITICAL] P99 latency: 847ms (SLA: 200ms). 23% request timeout rate. Deployment at 09:15 UTC. Current time: 12:45 UTC.",
+  "max_steps": 15,
+  "components": {
+    "api_gateway": {
+      "status": "healthy",
+      "description": "Entry point. Routes to load_balancer.",
+      "logs": [
+        {"time": "12:40 UTC", "level": "WARN", "msg": "Upstream timeout rate: 23%. Requests queuing. load_balancer responding slowly."},
+        {"time": "12:44 UTC", "level": "INFO", "msg": "Request rate unchanged at 890 req/s. Issue is latency, not volume."}
+      ],
+      "metrics": {"request_rate": 890, "error_rate": 0.23, "p99_latency_ms": 847}
+    },
+    "load_balancer": {
+      "status": "healthy",
+      "description": "Distributes load between feature_preprocessor_v1 (old) and feature_preprocessor_v2 (new). v2 was deployed at 09:15.",
+      "logs": [
+        {"time": "12:30 UTC", "level": "WARN", "msg": "feature_preprocessor_v2 response time degrading: avg 620ms. Routing 50% traffic to v1 as fallback."},
+        {"time": "12:44 UTC", "level": "ERROR", "msg": "feature_preprocessor_v2 avg response time: 780ms. Health check failing intermittently."}
+      ],
+      "metrics": {
+        "v1_traffic_percent": 50,
+        "v2_traffic_percent": 50,
+        "v2_avg_latency_ms": 780,
+        "v1_avg_latency_ms": 41
+      }
+    },
+    "feature_preprocessor_v1": {
+      "status": "healthy",
+      "description": "Old version. Stable. batch_size=32.",
+      "logs": [
+        {"time": "12:44 UTC", "level": "INFO", "msg": "Processing normally. batch_size=32, avg_time=38ms. Memory: 1.1GB/8GB."}
+      ],
+      "metrics": {"avg_latency_ms": 38, "memory_gb": 1.1, "batch_size": 32, "error_rate": 0.0}
+    },
+    "feature_preprocessor_v2": {
+      "status": "degraded",
+      "description": "New version deployed 09:15 UTC. Processes features before model inference.",
+      "logs": [
+        {"time": "09:15 UTC", "level": "INFO", "msg": "Deployment complete. config: batch_size=512, max_memory=8GB, workers=4."},
+        {"time": "09:30 UTC", "level": "INFO", "msg": "Memory usage: 2.1GB. Batch processing time: 145ms for batch_size=512."},
+        {"time": "10:15 UTC", "level": "WARN", "msg": "Memory usage: 3.4GB. Processing time increasing: 280ms."},
+        {"time": "11:30 UTC", "level": "WARN", "msg": "Memory usage: 4.8GB. GC pressure detected. Processing time: 510ms."},
+        {"time": "12:30 UTC", "level": "ERROR", "msg": "Memory usage: 6.2GB / 8GB. WARNING: approaching OOM. Processing time: 780ms. Memory leak suspected."},
+        {"time": "12:44 UTC", "level": "CRITICAL", "msg": "Memory at 7.1GB. OOM imminent. Recommend immediate rollback or config change."}
+      ],
+      "metrics": {
+        "memory_gb": {"09:15": 2.1, "10:15": 3.4, "11:30": 4.8, "12:30": 6.2, "12:44": 7.1},
+        "avg_latency_ms": 780,
+        "batch_size": 512,
+        "error_rate": 0.23,
+        "oom_risk": "critical"
+      }
+    },
+    "model_server": {
+      "status": "degraded",
+      "description": "Waits for features from feature_preprocessor. Blocking on slow v2 responses.",
+      "logs": [
+        {"time": "12:30 UTC", "level": "WARN", "msg": "Waiting >500ms for features from feature_preprocessor_v2. Timeout threshold: 200ms."},
+        {"time": "12:44 UTC", "level": "ERROR", "msg": "23% of requests timed out waiting for feature_preprocessor_v2."}
+      ],
+      "metrics": {"upstream_timeout_rate": 0.23, "p99_latency_ms": 847}
+    },
+    "cache_service": {
+      "status": "healthy",
+      "description": "Result cache. Not involved in this incident.",
+      "logs": [{"time": "12:44 UTC", "level": "INFO", "msg": "Cache hit rate: 42%. All operations nominal."}],
+      "metrics": {"cache_hit_rate": 0.42, "error_rate": 0.0}
+    }
+  },
+  "config_diff": {
+    "service": "feature_preprocessor_v2",
+    "deployment_time": "09:15 UTC",
+    "author": "ml-infra-bot",
+    "pr_title": "feat: upgrade feature preprocessor batch size for throughput",
+    "previous_config": {
+      "batch_size": 32,
+      "max_memory_gb": 2,
+      "workers": 4,
+      "memory_profile": "conservative"
+    },
+    "current_config": {
+      "batch_size": 512,
+      "max_memory_gb": 8,
+      "workers": 4,
+      "memory_profile": "aggressive"
+    },
+    "note": "batch_size increased 16x to improve throughput. Memory limit raised to accommodate. Memory leak under large batches not caught in staging (staging used batch_size=64)."
+  },
+  "global_metrics": {
+    "p99_latency_ms": {"current": 847, "pre_deployment": 45, "sla": 200},
+    "request_timeout_rate": {"current": 0.23, "pre_deployment": 0.001},
+    "v2_memory_growth_gb_per_hour": 1.2
+  },
+  "deployment_history": [
+    {"time": "09:15 UTC", "service": "feature_preprocessor_v2", "change": "batch_size 32->512, max_memory 2GB->8GB", "author": "ml-infra-bot"},
+    {"time": "07:00 UTC", "service": "cache_service", "change": "Routine cache flush", "author": "infra-bot"}
+  ],
+  "root_cause": "feature_preprocessor_v2_batch_size_512_memory_leak",
+  "root_cause_keywords": ["feature_preprocessor_v2", "batch_size", "memory", "512"],
+  "grader": {
+    "type": "partial_score",
+    "scoring": {
+      "correct_component_feature_preprocessor_v2": 0.5,
+      "correct_config_batch_size": 0.3,
+      "mentions_memory_or_oom": 0.2
+    }
+  },
+  "reward_config": {
+    "relevant_components": ["feature_preprocessor_v2", "load_balancer", "model_server"],
+    "key_evidence_logs": ["feature_preprocessor_v2"],
+    "key_evidence_configs": ["feature_preprocessor_v2"],
+    "explore_relevant_reward": 0.05,
+    "find_key_evidence_reward": 0.10,
+    "find_config_diff_reward": 0.15,
+    "correct_diagnosis_reward": 0.50,
+    "partial_diagnosis_reward": 0.25,
+    "loop_penalty": -0.15,
+    "false_diagnosis_penalty": -0.10
+  }
+}

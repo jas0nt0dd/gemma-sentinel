@@ -1,0 +1,126 @@
+{
+  "task_id": "easy",
+  "scenario_name": "Data Quality Alert",
+  "goal": "Model accuracy dropped 18% in the last 2 hours. SLA breach in 30 minutes. Investigate the system and identify the root cause. Use available actions: inspect, query_logs, check_metrics, submit_diagnosis.",
+  "alert_summary": "[CRITICAL] Recommendation model accuracy: 0.69 (SLA: 0.80). Breach in 30 min. Triggered at 14:32 UTC.",
+  "max_steps": 10,
+  "components": {
+    "api_gateway": {
+      "status": "healthy",
+      "description": "Handles all incoming inference requests. Routes to model_server.",
+      "logs": [
+        {"time": "14:30 UTC", "level": "INFO", "msg": "Request throughput normal: 1,240 req/s"},
+        {"time": "14:32 UTC", "level": "INFO", "msg": "All upstream routes healthy"}
+      ],
+      "metrics": {
+        "request_rate": 1240,
+        "error_rate": 0.001,
+        "p99_latency_ms": 143
+      }
+    },
+    "feature_store": {
+      "status": "degraded",
+      "description": "Pre-computes and caches model features. Fed by data_pipeline_a and data_pipeline_b.",
+      "logs": [
+        {"time": "14:18 UTC", "level": "WARN", "msg": "Received 340 null values in batch ID #9921, expected 0. Field: transaction_amount."},
+        {"time": "14:22 UTC", "level": "WARN", "msg": "Null rate rising: 12% of incoming records missing transaction_amount"},
+        {"time": "14:29 UTC", "level": "ERROR", "msg": "Null rate critical: 34% of records missing transaction_amount. Downstream models may degrade."}
+      ],
+      "metrics": {
+        "null_feature_rate": 0.34,
+        "batch_success_rate": 0.66,
+        "cache_hit_rate": 0.91
+      }
+    },
+    "data_pipeline_a": {
+      "status": "healthy",
+      "description": "Ingests user clickstream data. Feeds feature_store.",
+      "logs": [
+        {"time": "14:30 UTC", "level": "INFO", "msg": "Batch #1102 processed successfully. 0 errors."},
+        {"time": "14:31 UTC", "level": "INFO", "msg": "Schema validation passed. All fields nominal."}
+      ],
+      "metrics": {
+        "records_processed": 98200,
+        "error_rate": 0.000,
+        "schema_violations": 0
+      }
+    },
+    "data_pipeline_b": {
+      "status": "error",
+      "description": "Ingests transaction data from payment provider. Feeds feature_store. Schema migration was applied at 14:15 UTC.",
+      "logs": [
+        {"time": "14:15 UTC", "level": "INFO", "msg": "Schema migration v2.3.1 applied. Field 'transaction_amount' type changed: FLOAT -> STRING."},
+        {"time": "14:16 UTC", "level": "ERROR", "msg": "Schema validation FAILED: feature_store expects FLOAT for 'transaction_amount', received STRING. Batch #9919 rejected."},
+        {"time": "14:17 UTC", "level": "ERROR", "msg": "Schema validation FAILED: Batch #9920 rejected. 1,020 records dropped."},
+        {"time": "14:19 UTC", "level": "ERROR", "msg": "Schema validation FAILED: Batch #9921 partially accepted. 340/1,000 records have null transaction_amount after coercion."},
+        {"time": "14:28 UTC", "level": "CRITICAL", "msg": "Cumulative data loss since 14:15 UTC: 3,420 records with corrupted transaction_amount. Notify on-call engineer."}
+      ],
+      "metrics": {
+        "records_processed": 4100,
+        "error_rate": 0.41,
+        "schema_violations": 3420,
+        "last_successful_batch": "14:14 UTC"
+      }
+    },
+    "model_server": {
+      "status": "degraded",
+      "description": "Serves the recommendation model. Receives features from feature_store.",
+      "logs": [
+        {"time": "14:20 UTC", "level": "WARN", "msg": "Feature vector incomplete for 12% of requests. Using default value 0.0 for transaction_amount."},
+        {"time": "14:30 UTC", "level": "WARN", "msg": "Feature vector incomplete for 34% of requests. Prediction quality degraded."},
+        {"time": "14:32 UTC", "level": "CRITICAL", "msg": "Accuracy SLA breach: current accuracy 0.69, threshold 0.80."}
+      ],
+      "metrics": {
+        "accuracy": 0.69,
+        "accuracy_1h_ago": 0.87,
+        "accuracy_sla": 0.80,
+        "incomplete_feature_rate": 0.34
+      }
+    },
+    "monitoring_service": {
+      "status": "healthy",
+      "description": "Tracks system health and fires alerts.",
+      "logs": [
+        {"time": "14:32 UTC", "level": "CRITICAL", "msg": "ALERT FIRED: model_accuracy below SLA. Current: 0.69. Notifying on-call team."}
+      ],
+      "metrics": {
+        "alerts_fired_last_1h": 1,
+        "services_healthy": 3,
+        "services_degraded": 1,
+        "services_error": 1
+      }
+    }
+  },
+  "global_metrics": {
+    "model_accuracy": {"current": 0.69, "1h_ago": 0.87, "sla": 0.80},
+    "overall_null_rate": {"current": 0.34, "1h_ago": 0.02},
+    "system_request_rate": 1240
+  },
+  "deployment_history": [
+    {"time": "14:15 UTC", "service": "data_pipeline_b", "change": "Schema migration v2.3.1: transaction_amount FLOAT -> STRING", "author": "infra-bot"},
+    {"time": "09:00 UTC", "service": "model_server", "change": "Model weights refresh (routine)", "author": "ml-pipeline"}
+  ],
+  "root_cause": "data_pipeline_b_schema_mismatch",
+  "root_cause_keywords": ["data_pipeline_b", "schema", "transaction_amount", "migration"],
+  "grader": {
+    "type": "keyword_match",
+    "required_any": ["data_pipeline_b"],
+    "bonus_keywords": ["schema", "migration", "transaction_amount"],
+    "scoring": {
+      "required_present": 0.6,
+      "each_bonus_keyword": 0.1,
+      "max_score": 1.0
+    }
+  },
+  "reward_config": {
+    "relevant_components": ["data_pipeline_b", "feature_store", "model_server"],
+    "key_evidence_logs": ["data_pipeline_b", "feature_store"],
+    "explore_relevant_reward": 0.05,
+    "find_key_evidence_reward": 0.10,
+    "correct_diagnosis_reward": 0.50,
+    "partial_diagnosis_reward": 0.25,
+    "loop_penalty": -0.15,
+    "false_diagnosis_penalty": -0.10,
+    "step_over_max_penalty": -0.05
+  }
+}
