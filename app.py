@@ -5,7 +5,7 @@ Gemma 4 Good Hackathon | Global Resilience Impact Track
 Env vars (set as HF Space secrets):
   HF_TOKEN        Your HuggingFace token (Inference API access)
   HF_SPACE_URL    MLOps Incident env Space URL
-  MODEL_ID        Override model (default: google/gemma-3-4b-it)
+  MODEL_ID        Override model (default: google/gemma-4-E4B-it)
 """
 
 import json
@@ -20,7 +20,7 @@ from huggingface_hub import InferenceClient
 # --- Config ---
 HF_TOKEN  = os.getenv("HF_TOKEN", "")
 SPACE_URL = os.getenv("HF_SPACE_URL", "https://jason9150-mlops-incident-env.hf.space").rstrip("/")
-MODEL_ID  = os.getenv("MODEL_ID", "google/gemma-3-4b-it")
+MODEL_ID  = os.getenv("MODEL_ID", "google/gemma-4-E4B-it")
 
 # --- Task metadata ---
 TASK_META = {
@@ -90,21 +90,17 @@ def _post(endpoint, payload, retries=3):
             time.sleep(2 + i)
     return {}
 
-
 def env_reset(task_id):
     return _post("reset", {"task_id": task_id})
 
-
 def env_step(action, target):
     return _post("step", {"action_type": action, "target": target, "parameters": {}})
-
 
 def env_health():
     try:
         return requests.get(f"{SPACE_URL}/health", timeout=8).status_code == 200
     except Exception:
         return False
-
 
 def parse_json_from_text(text):
     try:
@@ -124,12 +120,12 @@ def run_sentinel(task_id):
     status    = "Starting..."
 
     def emit():
-        log_text   = "\n".join(log_lines)
-        diag_text  = json.dumps(diagnosis, indent=2) if diagnosis else ""
+        log_text  = "\n".join(log_lines)
+        diag_text = json.dumps(diagnosis, indent=2) if diagnosis else ""
         score_html = _score_badge(score) if diagnosis else ""
         return log_text, diag_text, score_html, status
 
-    # Step 1: health
+    # Step 1: health check
     status = "Checking environment..."
     yield emit()
     if not env_health():
@@ -140,7 +136,7 @@ def run_sentinel(task_id):
     log_lines.append("Environment online: " + SPACE_URL)
     log_lines.append("Model: " + MODEL_ID)
 
-    # Step 2: reset
+    # Step 2: reset scenario
     status = "Resetting scenario..."
     yield emit()
     try:
@@ -155,11 +151,7 @@ def run_sentinel(task_id):
     goal    = obs.get("goal", "(no goal)")
     comp_st = obs.get("component_status", {}) or {}
 
-    log_lines.append("")
-    log_lines.append("ALERT: " + alert)
-    log_lines.append("GOAL:  " + goal)
-    log_lines.append("")
-    log_lines.append("COMPONENT STATUS:")
+    log_lines += ["", "ALERT: " + alert, "GOAL:  " + goal, "", "COMPONENT STATUS:"]
     for k, v in comp_st.items():
         tag = "[ERR] " if v in ("error", "critical") else "[WRN] " if v == "degraded" else "[ OK] "
         log_lines.append("  " + tag + k + ": " + v)
@@ -169,8 +161,7 @@ def run_sentinel(task_id):
     status = "Investigating..."
     evidence_lines = []
     for action, target in TASK_META[task_id]["investigate"]:
-        log_lines.append("")
-        log_lines.append("> " + action + "(" + target + ")")
+        log_lines += ["", "> " + action + "(" + target + ")"]
         yield emit()
         try:
             s  = env_step(action, target)
@@ -185,15 +176,15 @@ def run_sentinel(task_id):
         time.sleep(0.1)
         yield emit()
 
-    # Step 4: call model
-    status = "Model reasoning..."
+    # Step 4: call Gemma 4
+    status = "Gemma 4 reasoning..."
     yield emit()
 
     status_lines  = "\n".join("- " + k + ": " + v for k, v in comp_st.items())[:900]
     evidence_text = "\n".join(evidence_lines) or "(none collected)"
     user_msg = (
         "ALERT: " + alert + "\n"
-        "GOAL: " + goal + "\n\n"
+        "GOAL: "  + goal   + "\n\n"
         "COMPONENT STATUS:\n" + status_lines + "\n\n"
         "EVIDENCE:\n" + evidence_text + "\n\n"
         "Output the JSON diagnosis now."
@@ -204,12 +195,10 @@ def run_sentinel(task_id):
         if not HF_TOKEN:
             raise ValueError("HF_TOKEN not set as a Space secret.")
 
-        # provider='auto' lets HF pick the correct inference provider
-        # for the model automatically (Gemma is NOT on hf-inference)
         client = InferenceClient(
             model=MODEL_ID,
             token=HF_TOKEN,
-            provider="auto",
+            provider="auto",   # auto-picks correct provider for Gemma 4
         )
         messages = [{"role": "user", "content": SYS_PROMPT + "\n\n" + user_msg}]
 
@@ -225,28 +214,23 @@ def run_sentinel(task_id):
 
     except Exception as e:
         err = str(e)
-        status = "Model call failed."
-        log_lines.append("")
-        log_lines.append("ERROR calling model: " + err)
-        log_lines.append("")
-        log_lines.append("TROUBLESHOOT:")
-        log_lines.append("  1. Accept model license at huggingface.co/" + MODEL_ID)
-        log_lines.append("  2. Go to hf.co/settings/inference-providers and enable a provider")
-        log_lines.append("  3. Or set MODEL_ID secret to: meta-llama/Llama-3.2-3B-Instruct")
+        status = "Gemma 4 call failed."
+        log_lines += ["", "ERROR calling " + MODEL_ID + ": " + err, "", "TROUBLESHOOT:"]
+        log_lines.append("  1. Accept license at huggingface.co/" + MODEL_ID)
+        log_lines.append("  2. Enable a provider at hf.co/settings/inference-providers")
+        log_lines.append("  3. Fallback model: set MODEL_ID=google/gemma-4-E2B-it in Space secrets")
         yield emit()
         return
 
-    log_lines.append("")
-    log_lines.append("--- Model raw output ---")
-    log_lines.append(raw_output[:600])
+    log_lines += ["", "--- Gemma 4 raw output ---", raw_output[:600]]
     yield emit()
 
-    # Step 5: parse
+    # Step 5: parse JSON
     status = "Parsing diagnosis..."
     parsed = parse_json_from_text(raw_output)
     if not parsed or "target" not in parsed:
         status = "Could not parse JSON. Using fallback..."
-        log_lines.append("WARNING: No valid JSON found. Using evidence-based fallback.")
+        log_lines.append("WARNING: No valid JSON. Using evidence-based fallback.")
         fallback_target = next(
             (k for k, v in comp_st.items() if v in ("error", "critical")),
             next((k for k, v in comp_st.items() if v == "degraded"), None)
@@ -263,10 +247,12 @@ def run_sentinel(task_id):
             return
 
     diagnosis = parsed
-    log_lines.append("")
-    log_lines.append("DIAGNOSIS -> target: " + parsed["target"])
-    log_lines.append("Root cause: " + parsed.get("root_cause", ""))
-    log_lines.append("Fix: " + parsed.get("fix", ""))
+    log_lines += [
+        "",
+        "DIAGNOSIS -> target: " + parsed["target"],
+        "Root cause: "         + parsed.get("root_cause", ""),
+        "Fix: "                + parsed.get("fix", ""),
+    ]
     yield emit()
 
     # Step 6: submit
@@ -289,16 +275,11 @@ def run_sentinel(task_id):
 
 
 def _score_badge(score):
-    if score >= 0.9:
-        color, label = "#22c55e", "EXCELLENT"
-    elif score >= 0.7:
-        color, label = "#84cc16", "GOOD"
-    elif score >= 0.4:
-        color, label = "#f59e0b", "PARTIAL"
-    elif score > 0.0:
-        color, label = "#ef4444", "LOW"
-    else:
-        color, label = "#6b7280", "MISS"
+    if score >= 0.9:  color, label = "#22c55e", "EXCELLENT"
+    elif score >= 0.7: color, label = "#84cc16", "GOOD"
+    elif score >= 0.4: color, label = "#f59e0b", "PARTIAL"
+    elif score > 0.0:  color, label = "#ef4444", "LOW"
+    else:              color, label = "#6b7280", "MISS"
     pct = int(score * 100)
     return (
         '<div style="display:inline-block;background:' + color
@@ -307,18 +288,12 @@ def _score_badge(score):
         + str(pct) + '% &mdash; ' + label + '</div>'
     )
 
-
 def _status_from_score(score):
-    if score >= 0.9:
-        return "Perfect diagnosis! SentinelAI nailed it."
-    elif score >= 0.7:
-        return "Good diagnosis - correct root identified."
-    elif score >= 0.4:
-        return "Partial credit - partially correct."
-    elif score > 0.0:
-        return "Low score - wrong component targeted."
-    else:
-        return "Miss - incorrect diagnosis."
+    if score >= 0.9:   return "Perfect diagnosis! Gemma 4 nailed it. 🎉"
+    elif score >= 0.7: return "Good diagnosis - correct root identified."
+    elif score >= 0.4: return "Partial credit - partially correct."
+    elif score > 0.0:  return "Low score - wrong component targeted."
+    else:              return "Miss - incorrect diagnosis."
 
 
 # --- Gradio UI ---
@@ -351,8 +326,8 @@ with gr.Blocks(
 
     gr.HTML("""
     <div class="sentinel-header">
-        <h1>SentinelAI</h1>
-        <p>Autonomous MLOps Incident Response &middot; Powered by Gemma 3 4B &middot; Gemma 4 Good Hackathon</p>
+        <h1>🛡️ SentinelAI</h1>
+        <p>Autonomous MLOps Incident Response &middot; Powered by <strong>Gemma 4</strong> &middot; Gemma 4 Good Hackathon 2026</p>
     </div>
     """)
 
@@ -367,16 +342,17 @@ with gr.Blocks(
             task_desc_box = gr.HTML(
                 value='<div class="task-desc">' + TASK_META["easy"]["desc"] + '</div>'
             )
-            run_btn = gr.Button("Run SentinelAI", variant="primary", size="lg")
+            run_btn = gr.Button("🚀 Run SentinelAI", variant="primary", size="lg")
             gr.Markdown("""
 ---
 **How it works:**
 1. Resets the live RL environment
 2. Investigates: logs, metrics, drift signals
-3. Gemma 3 4B reads all evidence and reasons
+3. Gemma 4 reads evidence & reasons
 4. Outputs structured JSON diagnosis
 5. Real score returned from environment
 
+**Model:** `google/gemma-4-E4B-it`
 **Env:** [MLOps Incident OpenEnv](https://huggingface.co/spaces/jason9150/mlops-incident-env)
 """)
 
@@ -413,18 +389,15 @@ with gr.Blocks(
 """)
 
     def update_desc(task_id):
-        desc = TASK_META.get(task_id, {}).get("desc", "")
-        return '<div class="task-desc">' + desc + '</div>'
+        return '<div class="task-desc">' + TASK_META.get(task_id, {}).get("desc", "") + '</div>'
 
     task_radio.change(fn=update_desc, inputs=task_radio, outputs=task_desc_box)
-
     run_btn.click(
         fn=run_sentinel,
         inputs=task_radio,
         outputs=[log_box, diag_box, score_box, status_box],
         show_progress=True,
     )
-
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=7860, show_error=True)
