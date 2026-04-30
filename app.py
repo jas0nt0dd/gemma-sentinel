@@ -5,7 +5,7 @@ Gemma 4 Good Hackathon | Global Resilience Impact Track
 Env vars (set as HF Space secrets):
   HF_TOKEN        Your HuggingFace token (Inference API access)
   HF_SPACE_URL    MLOps Incident env Space URL
-  MODEL_ID        Override model (default: google/gemma-2-2b-it)
+  MODEL_ID        Override model (default: google/gemma-3-4b-it)
 """
 
 import json
@@ -20,7 +20,7 @@ from huggingface_hub import InferenceClient
 # --- Config ---
 HF_TOKEN  = os.getenv("HF_TOKEN", "")
 SPACE_URL = os.getenv("HF_SPACE_URL", "https://jason9150-mlops-incident-env.hf.space").rstrip("/")
-MODEL_ID  = os.getenv("MODEL_ID", "google/gemma-2-2b-it")
+MODEL_ID  = os.getenv("MODEL_ID", "google/gemma-3-4b-it")
 
 # --- Task metadata ---
 TASK_META = {
@@ -352,7 +352,7 @@ with gr.Blocks(
     gr.HTML("""
     <div class="sentinel-header">
         <h1>SentinelAI</h1>
-        <p>Autonomous MLOps Incident Response &middot; Powered by Gemma &middot; Gemma 4 Good Hackathon</p>
+        <p>Autonomous MLOps Incident Response &middot; Powered by Gemma 3 4B &middot; Gemma 4 Good Hackathon</p>
     </div>
     """)
 
@@ -373,7 +373,7 @@ with gr.Blocks(
 **How it works:**
 1. Resets the live RL environment
 2. Investigates: logs, metrics, drift signals
-3. Model reads all evidence and reasons
+3. Gemma 3 4B reads all evidence and reasons
 4. Outputs structured JSON diagnosis
 5. Real score returned from environment
 
