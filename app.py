@@ -4,22 +4,21 @@ Gemma 4 Good Hackathon | Global Resilience Impact Track
 
 How it works:
   1. User picks a task scenario (easy / medium / hard / cascade)
-  2. SentinelAI (Gemma 4 via HF Inference API) reads the live MLOps env
+  2. SentinelAI (Gemma via HF Inference API) reads the live MLOps env
   3. Agent investigates: queries logs, checks metrics, compares configs
-  4. Gemma 4 reasons with <think> tags and outputs a structured JSON diagnosis
+  4. Gemma reasons and outputs a structured JSON diagnosis
   5. Diagnosis is submitted to the env -> real score returned
 
 Env vars (set as HF Space secrets):
-  HF_TOKEN        Your HuggingFace token (for Inference API)
+  HF_TOKEN        Your HuggingFace token (Inference API access)
   HF_SPACE_URL    MLOps Incident env Space URL
-  MODEL_ID        Gemma model to use (default: google/gemma-3-4b-it)
+  MODEL_ID        Override model (default: google/gemma-2-2b-it)
 """
 
 import json
 import os
 import re
 import time
-from typing import Generator
 
 import gradio as gr
 import requests
@@ -28,7 +27,7 @@ from huggingface_hub import InferenceClient
 # --- Config ---
 HF_TOKEN  = os.getenv("HF_TOKEN", "")
 SPACE_URL = os.getenv("HF_SPACE_URL", "https://jason9150-mlops-incident-env.hf.space").rstrip("/")
-MODEL_ID  = os.getenv("MODEL_ID", "google/gemma-3-4b-it")
+MODEL_ID  = os.getenv("MODEL_ID", "google/gemma-2-2b-it")
 
 # --- Task metadata ---
 TASK_META = {
@@ -72,20 +71,17 @@ TASK_META = {
     },
 }
 
-SYS_PROMPT = """You are SentinelAI, an autonomous MLOps incident response agent powered by Gemma 4.
+SYS_PROMPT = """You are SentinelAI, an autonomous MLOps incident response agent.
 You diagnose production AI/ML system failures from component status and evidence.
 
-Reasoning steps:
+Rules:
 - Identify components in degraded, error, warning, or critical states.
 - Weigh log evidence, metric spikes, config changes, and feature drift signals.
 - For cascade failures, find the upstream root that explains all downstream symptoms.
 - target must exactly match a component name from COMPONENT STATUS.
 
-Think step-by-step in <think>...</think> (2-3 sentences).
-Then output ONLY this single-line JSON:
-{"target":"<exact_component_name>","root_cause":"<one sentence>","fix":"<one sentence>"}
-
-No markdown. No extra text after the JSON."""
+Output ONLY this single-line JSON (no markdown, no extra text):
+{"target":"<exact_component_name>","root_cause":"<one sentence>","fix":"<one sentence>"}"""
 
 
 # --- Environment helpers ---
@@ -118,9 +114,8 @@ def env_health():
 
 
 def parse_json_from_text(text):
-    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     try:
-        m = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+        m = re.search(r"\{.*\}", text, flags=re.DOTALL)
         if m:
             return json.loads(m.group())
     except Exception:
@@ -128,34 +123,29 @@ def parse_json_from_text(text):
     return None
 
 
-def extract_think(text):
-    m = re.search(r"<think>(.*?)</think>", text, flags=re.DOTALL)
-    return m.group(1).strip() if m else ""
-
-
 # --- Main agent ---
 def run_sentinel(task_id):
     log_lines = []
-    thinking  = ""
     diagnosis = {}
     score     = 0.0
     status    = "Starting..."
 
     def emit():
-        log_text  = "\n".join(log_lines)
-        diag_text = json.dumps(diagnosis, indent=2) if diagnosis else ""
+        log_text   = "\n".join(log_lines)
+        diag_text  = json.dumps(diagnosis, indent=2) if diagnosis else ""
         score_html = _score_badge(score) if diagnosis else ""
-        return log_text, thinking, diag_text, score_html, status
+        return log_text, diag_text, score_html, status
 
-    # Step 1: health check
+    # Step 1: health
     status = "Checking environment..."
     yield emit()
     if not env_health():
-        status = "Environment unreachable. Check HF_SPACE_URL secret."
-        log_lines.append("ERROR: Cannot reach " + SPACE_URL)
+        status = "ERROR: Environment unreachable. Check HF_SPACE_URL secret."
+        log_lines.append("Cannot reach: " + SPACE_URL)
         yield emit()
         return
     log_lines.append("Environment online: " + SPACE_URL)
+    log_lines.append("Model: " + MODEL_ID)
 
     # Step 2: reset
     status = "Resetting scenario..."
@@ -171,14 +161,15 @@ def run_sentinel(task_id):
     alert   = obs.get("alert_summary", "(no alert)")
     goal    = obs.get("goal", "(no goal)")
     comp_st = obs.get("component_status", {}) or {}
+
     log_lines.append("")
     log_lines.append("ALERT: " + alert)
     log_lines.append("GOAL:  " + goal)
     log_lines.append("")
     log_lines.append("COMPONENT STATUS:")
     for k, v in comp_st.items():
-        marker = "[ERR]" if v in ("error", "critical") else "[WARN]" if v == "degraded" else "[ OK]"
-        log_lines.append("  " + marker + " " + k + ": " + v)
+        tag = "[ERR] " if v in ("error", "critical") else "[WRN] " if v == "degraded" else "[ OK] "
+        log_lines.append("  " + tag + k + ": " + v)
     yield emit()
 
     # Step 3: investigate
@@ -190,9 +181,9 @@ def run_sentinel(task_id):
         yield emit()
         try:
             s  = env_step(action, target)
-            fb = (s.get("action_feedback") or "")[:400]
+            fb = (s.get("action_feedback") or "")[:500]
             if fb:
-                log_lines.append("  -> " + fb)
+                log_lines.append("  " + fb)
                 evidence_lines.append("[" + action + "(" + target + ")] " + fb)
             if s.get("done"):
                 break
@@ -201,61 +192,90 @@ def run_sentinel(task_id):
         time.sleep(0.1)
         yield emit()
 
-    # Step 4: call Gemma 4
-    status = "Gemma 4 reasoning..."
+    # Step 4: call model
+    status = "Model reasoning..."
     yield emit()
 
     status_lines  = "\n".join("- " + k + ": " + v for k, v in comp_st.items())[:900]
-    evidence_text = "\n".join(evidence_lines) or "(none)"
+    evidence_text = "\n".join(evidence_lines) or "(none collected)"
     user_msg = (
         "ALERT: " + alert + "\n"
         "GOAL: " + goal + "\n\n"
         "COMPONENT STATUS:\n" + status_lines + "\n\n"
         "EVIDENCE:\n" + evidence_text + "\n\n"
-        "Diagnose the root cause and output the required JSON."
+        "Output the JSON diagnosis now."
     )
 
     raw_output = ""
     try:
         if not HF_TOKEN:
-            raise ValueError("HF_TOKEN not set. Add it as a Space secret.")
-        client = InferenceClient(model=MODEL_ID, token=HF_TOKEN)
+            raise ValueError("HF_TOKEN not set as a Space secret.")
+
+        client = InferenceClient(
+            model=MODEL_ID,
+            token=HF_TOKEN,
+            provider="hf-inference",
+        )
         messages = [{"role": "user", "content": SYS_PROMPT + "\n\n" + user_msg}]
+
         for chunk in client.chat_completion(
             messages=messages,
-            max_tokens=512,
-            temperature=0.3,
+            max_tokens=256,
+            temperature=0.2,
             stream=True,
         ):
             delta = chunk.choices[0].delta.content or ""
             raw_output += delta
-            thinking = extract_think(raw_output) or raw_output[:300]
             yield emit()
+
     except Exception as e:
-        status = "Gemma 4 call failed: " + str(e)
-        log_lines.append("ERROR calling " + MODEL_ID + ": " + str(e))
-        log_lines.append("Make sure HF_TOKEN is set and has Inference API access.")
+        err = str(e)
+        status = "Model call failed."
+        log_lines.append("")
+        log_lines.append("ERROR: " + err)
+        if "not supported" in err:
+            log_lines.append("")
+            log_lines.append("FIX: Go to Space Settings and set MODEL_ID to one of:")
+            log_lines.append("  - google/gemma-2-2b-it")
+            log_lines.append("  - mistralai/Mistral-7B-Instruct-v0.3")
+            log_lines.append("  - meta-llama/Llama-3.2-3B-Instruct")
+        elif "401" in err or "403" in err:
+            log_lines.append("FIX: HF_TOKEN is invalid or has no Inference API access.")
         yield emit()
         return
 
     log_lines.append("")
-    log_lines.append("Gemma 4 raw output:")
+    log_lines.append("--- Model raw output ---")
     log_lines.append(raw_output[:600])
-    thinking = extract_think(raw_output)
     yield emit()
 
     # Step 5: parse
     status = "Parsing diagnosis..."
-    yield emit()
     parsed = parse_json_from_text(raw_output)
     if not parsed or "target" not in parsed:
-        status = "Could not parse JSON from model output."
-        log_lines.append("WARNING: No valid JSON found.")
-        yield emit()
-        return
+        status = "Could not parse JSON from model output. Trying fallback..."
+        log_lines.append("WARNING: No valid JSON found. Using evidence-based fallback.")
+        # Fallback: pick highest-severity component
+        fallback_target = next(
+            (k for k, v in comp_st.items() if v in ("error", "critical")),
+            next((k for k, v in comp_st.items() if v == "degraded"), None)
+        )
+        if fallback_target:
+            parsed = {
+                "target": fallback_target,
+                "root_cause": "Highest severity component identified by fallback heuristic.",
+                "fix": "Investigate " + fallback_target + " logs and metrics."
+            }
+            log_lines.append("Fallback target: " + fallback_target)
+        else:
+            yield emit()
+            return
 
     diagnosis = parsed
-    log_lines.append("Parsed: target=" + parsed["target"])
+    log_lines.append("")
+    log_lines.append("DIAGNOSIS -> target: " + parsed["target"])
+    log_lines.append("Root cause: " + parsed.get("root_cause", ""))
+    log_lines.append("Fix: " + parsed.get("fix", ""))
     yield emit()
 
     # Step 6: submit
@@ -265,11 +285,12 @@ def run_sentinel(task_id):
         result = env_step("submit_diagnosis", parsed["target"])
         score  = float(result.get("final_score") or result.get("reward") or 0.0)
         fb     = result.get("action_feedback") or ""
+        log_lines.append("")
         log_lines.append("SCORE: " + str(round(score, 4)))
         if fb:
             log_lines.append("Feedback: " + fb)
     except Exception as e:
-        log_lines.append("WARNING: Score submission failed: " + str(e))
+        log_lines.append("WARNING: Submission failed: " + str(e))
         score = 0.0
 
     status = _status_from_score(score)
@@ -289,9 +310,10 @@ def _score_badge(score):
         color, label = "#6b7280", "MISS"
     pct = int(score * 100)
     return (
-        '<div style="display:inline-block;background:' + color + ';color:white;'
-        'padding:8px 20px;border-radius:8px;font-size:1.4rem;font-weight:700;">'
-        + str(pct) + '% - ' + label + '</div>'
+        '<div style="display:inline-block;background:' + color
+        + ';color:white;padding:8px 24px;border-radius:8px;'
+        + 'font-size:1.5rem;font-weight:700;margin-top:8px;">'
+        + str(pct) + '% &mdash; ' + label + '</div>'
     )
 
 
@@ -314,21 +336,15 @@ TASK_CHOICES = [(v["label"], k) for k, v in TASK_META.items()]
 CSS = """
 .sentinel-header {
     background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f2d4a 100%);
-    border-radius: 12px;
-    padding: 24px 32px;
-    margin-bottom: 16px;
+    border-radius: 12px; padding: 24px 32px; margin-bottom: 16px;
     border: 1px solid #334155;
 }
 .sentinel-header h1 { color: #38bdf8; font-size: 2rem; font-weight: 800; margin: 0 0 4px 0; }
 .sentinel-header p  { color: #94a3b8; margin: 0; font-size: 0.95rem; }
 .task-desc {
-    background: #1e293b;
-    border-left: 4px solid #38bdf8;
-    border-radius: 0 8px 8px 0;
-    padding: 10px 16px;
-    color: #cbd5e1;
-    font-size: 0.9rem;
-    margin-top: 8px;
+    background: #1e293b; border-left: 4px solid #38bdf8;
+    border-radius: 0 8px 8px 0; padding: 10px 16px;
+    color: #cbd5e1; font-size: 0.9rem; margin-top: 8px;
 }
 """
 
@@ -345,7 +361,7 @@ with gr.Blocks(
     gr.HTML("""
     <div class="sentinel-header">
         <h1>SentinelAI</h1>
-        <p>Autonomous MLOps Incident Response &middot; Powered by Gemma 4 &middot; Gemma 4 Good Hackathon</p>
+        <p>Autonomous MLOps Incident Response &middot; Powered by Gemma &middot; Gemma 4 Good Hackathon</p>
     </div>
     """)
 
@@ -355,23 +371,21 @@ with gr.Blocks(
                 choices=TASK_CHOICES,
                 value="easy",
                 label="Select Incident Scenario",
-                info="Each scenario has different complexity and failure patterns.",
+                info="Each scenario tests different failure patterns.",
             )
             task_desc_box = gr.HTML(
                 value='<div class="task-desc">' + TASK_META["easy"]["desc"] + '</div>'
             )
             run_btn = gr.Button("Run SentinelAI", variant="primary", size="lg")
-
             gr.Markdown("""
 ---
 **How it works:**
-1. Agent resets the live RL environment
-2. Runs investigation actions (logs, metrics, drift)
-3. Gemma 4 reads all evidence and reasons
+1. Resets the live RL environment
+2. Investigates: logs, metrics, drift signals
+3. Model reads all evidence and reasons
 4. Outputs structured JSON diagnosis
-5. Score returned from the live environment
+5. Real score returned from environment
 
-**Model:** `google/gemma-3-4b-it`
 **Env:** [MLOps Incident OpenEnv](https://huggingface.co/spaces/jason9150/mlops-incident-env)
 """)
 
@@ -379,58 +393,44 @@ with gr.Blocks(
             status_box = gr.Textbox(
                 label="Status",
                 value="Select a scenario and click Run SentinelAI.",
-                interactive=False,
-                max_lines=1,
+                interactive=False, max_lines=1,
             )
-            score_box = gr.HTML(label="Score")
+            score_box = gr.HTML()
 
             with gr.Tabs():
                 with gr.TabItem("Investigation Log"):
                     log_box = gr.Textbox(
-                        label="",
-                        lines=18,
-                        max_lines=30,
+                        label="", lines=20, max_lines=35,
                         interactive=False,
                         placeholder="Investigation log will appear here...",
                     )
-                with gr.TabItem("Gemma 4 Reasoning"):
-                    thinking_box = gr.Textbox(
-                        label="",
-                        lines=8,
-                        max_lines=15,
-                        interactive=False,
-                        placeholder="Gemma 4 reasoning will appear here as it streams...",
-                    )
                 with gr.TabItem("Diagnosis JSON"):
                     diag_box = gr.Code(
-                        label="",
-                        language="json",
-                        lines=8,
-                        interactive=False,
+                        label="", language="json",
+                        lines=8, interactive=False,
                     )
 
     gr.Markdown("""
 ---
 ### Scenario Guide
-
-| Scenario | Difficulty | What to look for |
+| Scenario | Difficulty | Root cause location |
 |---|---|---|
-| Easy - Data Quality | Beginner | Schema change in `data_pipeline_a` |
-| Medium - Latency Spike | Intermediate | Config change in `feature_preprocessor_v2` |
-| Hard - Silent Drift | Advanced | PSI spike in `feature_store` |
-| Cascade - Multi-Failure | Expert | Upstream `embedding_service_v3` |
+| Easy - Data Quality | Beginner | `data_pipeline_a` schema change |
+| Medium - Latency Spike | Intermediate | `feature_preprocessor_v2` config |
+| Hard - Silent Drift | Advanced | `feature_store` PSI spike |
+| Cascade - Multi-Failure | Expert | `embedding_service_v3` upstream |
 """)
 
-    def update_task_desc(task_id):
+    def update_desc(task_id):
         desc = TASK_META.get(task_id, {}).get("desc", "")
         return '<div class="task-desc">' + desc + '</div>'
 
-    task_radio.change(fn=update_task_desc, inputs=task_radio, outputs=task_desc_box)
+    task_radio.change(fn=update_desc, inputs=task_radio, outputs=task_desc_box)
 
     run_btn.click(
         fn=run_sentinel,
         inputs=task_radio,
-        outputs=[log_box, thinking_box, diag_box, score_box, status_box],
+        outputs=[log_box, diag_box, score_box, status_box],
         show_progress=True,
     )
 
