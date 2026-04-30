@@ -2,13 +2,6 @@
 SentinelAI — Gradio Demo App
 Gemma 4 Good Hackathon | Global Resilience Impact Track
 
-How it works:
-  1. User picks a task scenario (easy / medium / hard / cascade)
-  2. SentinelAI (Gemma via HF Inference API) reads the live MLOps env
-  3. Agent investigates: queries logs, checks metrics, compares configs
-  4. Gemma reasons and outputs a structured JSON diagnosis
-  5. Diagnosis is submitted to the env -> real score returned
-
 Env vars (set as HF Space secrets):
   HF_TOKEN        Your HuggingFace token (Inference API access)
   HF_SPACE_URL    MLOps Incident env Space URL
@@ -211,10 +204,12 @@ def run_sentinel(task_id):
         if not HF_TOKEN:
             raise ValueError("HF_TOKEN not set as a Space secret.")
 
+        # provider='auto' lets HF pick the correct inference provider
+        # for the model automatically (Gemma is NOT on hf-inference)
         client = InferenceClient(
             model=MODEL_ID,
             token=HF_TOKEN,
-            provider="hf-inference",
+            provider="auto",
         )
         messages = [{"role": "user", "content": SYS_PROMPT + "\n\n" + user_msg}]
 
@@ -232,15 +227,12 @@ def run_sentinel(task_id):
         err = str(e)
         status = "Model call failed."
         log_lines.append("")
-        log_lines.append("ERROR: " + err)
-        if "not supported" in err:
-            log_lines.append("")
-            log_lines.append("FIX: Go to Space Settings and set MODEL_ID to one of:")
-            log_lines.append("  - google/gemma-2-2b-it")
-            log_lines.append("  - mistralai/Mistral-7B-Instruct-v0.3")
-            log_lines.append("  - meta-llama/Llama-3.2-3B-Instruct")
-        elif "401" in err or "403" in err:
-            log_lines.append("FIX: HF_TOKEN is invalid or has no Inference API access.")
+        log_lines.append("ERROR calling model: " + err)
+        log_lines.append("")
+        log_lines.append("TROUBLESHOOT:")
+        log_lines.append("  1. Accept model license at huggingface.co/" + MODEL_ID)
+        log_lines.append("  2. Go to hf.co/settings/inference-providers and enable a provider")
+        log_lines.append("  3. Or set MODEL_ID secret to: meta-llama/Llama-3.2-3B-Instruct")
         yield emit()
         return
 
@@ -253,9 +245,8 @@ def run_sentinel(task_id):
     status = "Parsing diagnosis..."
     parsed = parse_json_from_text(raw_output)
     if not parsed or "target" not in parsed:
-        status = "Could not parse JSON from model output. Trying fallback..."
+        status = "Could not parse JSON. Using fallback..."
         log_lines.append("WARNING: No valid JSON found. Using evidence-based fallback.")
-        # Fallback: pick highest-severity component
         fallback_target = next(
             (k for k, v in comp_st.items() if v in ("error", "critical")),
             next((k for k, v in comp_st.items() if v == "degraded"), None)
