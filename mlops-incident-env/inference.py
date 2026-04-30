@@ -1,8 +1,18 @@
-﻿"""
-inference.py - MLOps Incident Response | LLM-driven agent
+"""
+inference.py - SentinelAI | Gemma 4-powered MLOps Incident Response Agent
 
 The agent reads observations, keeps conversation memory, and decides every action.
 There are no task-specific scripted paths or hidden keyword-injected diagnoses.
+
+Backend selection via BACKEND env var:
+  BACKEND=hf      → HuggingFace Inference API  (default, uses HF_TOKEN)
+  BACKEND=ollama  → Ollama local server         (uses OLLAMA_HOST, default localhost:11434)
+  BACKEND=groq    → Groq API                    (uses GROQ_API_KEY, legacy fallback)
+
+Model defaults:
+  hf     → google/gemma-3-4b-it   (free HF tier, 128k context)
+  ollama → gemma3:4b               (run: ollama pull gemma3:4b)
+  groq   → llama-3.1-8b-instant   (legacy)
 
 Oracle distillation: set ORACLE_TRACE_PATH=traces/oracle.jsonl (optional ORACLE_TRACE_MIN_SCORE=0.9)
 to append successful episode traces. Convert with scripts/oracle_traces_to_sft_jsonl.py then
@@ -27,39 +37,58 @@ from openai.types.chat import ChatCompletionMessageParam
 
 load_dotenv()
 
-API_BASE_URL = os.getenv("API_BASE_URL") or "https://api.groq.com/openai/v1"
-API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("HF_TOKEN") or os.getenv("API_KEY", "")
-MODEL_NAME = os.getenv("MODEL_NAME") or "llama-3.1-8b-instant"
+# ---------------------------------------------------------------------------
+# Backend routing: hf | ollama | groq
+# ---------------------------------------------------------------------------
+BACKEND = os.getenv("BACKEND", "hf").lower()
+
+_HF_BASE     = "https://api-inference.huggingface.co/v1"
+_OLLAMA_BASE = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/") + "/v1"
+_GROQ_BASE   = "https://api.groq.com/openai/v1"
+
+if BACKEND == "ollama":
+    API_BASE_URL = os.getenv("API_BASE_URL") or _OLLAMA_BASE
+    API_KEY      = os.getenv("API_KEY", "ollama")           # Ollama ignores key value
+    MODEL_NAME   = os.getenv("MODEL_NAME") or "gemma3:4b"
+elif BACKEND == "groq":
+    API_BASE_URL = os.getenv("API_BASE_URL") or _GROQ_BASE
+    API_KEY      = os.getenv("GROQ_API_KEY") or os.getenv("HF_TOKEN") or os.getenv("API_KEY", "")
+    MODEL_NAME   = os.getenv("MODEL_NAME") or "llama-3.1-8b-instant"
+else:  # hf  (default)
+    API_BASE_URL = os.getenv("API_BASE_URL") or _HF_BASE
+    API_KEY      = os.getenv("HF_TOKEN") or os.getenv("API_KEY", "")
+    MODEL_NAME   = os.getenv("MODEL_NAME") or "google/gemma-3-4b-it"
+
 HF_SPACE_URL = os.getenv("HF_SPACE_URL", "http://localhost:8000").rstrip("/")
 
 # Append gold-standard oracle trajectories (full message history) for distillation → SFT → GRPO.
-ORACLE_TRACE_PATH = os.getenv("ORACLE_TRACE_PATH", "").strip()
+ORACLE_TRACE_PATH     = os.getenv("ORACLE_TRACE_PATH", "").strip()
 ORACLE_TRACE_MIN_SCORE = float(os.getenv("ORACLE_TRACE_MIN_SCORE", "0.9"))
 
-ENV_NAME = "mlops-incident-env"
-MAX_STEPS = 12
-TEMPERATURE = 0.2
-MAX_TOKENS = 700
+ENV_NAME          = "mlops-incident-env"
+MAX_STEPS         = 12
+TEMPERATURE       = 0.2
+MAX_TOKENS        = 700
 PROMPT_JSON_CHARS = 1800
 PROMPT_HISTORY_LINES = 8
 HISTORY_FEEDBACK_CHARS = 650
 TASKS = ["easy", "medium", "hard", "cascade"]
 TASK_STEP_BUDGET = {
-    "easy": 10,
-    "medium": 15,
-    "hard": 25,
+    "easy":    10,
+    "medium":  15,
+    "hard":    25,
     "cascade": 30,
 }
 TASK_FORCE_SUBMIT_AT = {
-    "easy": 4,
-    "medium": 5,
-    "hard": 6,
+    "easy":    4,
+    "medium":  5,
+    "hard":    6,
     "cascade": 8,
 }
-HTTP_RETRY_ATTEMPTS = 3
+HTTP_RETRY_ATTEMPTS  = 3
 HTTP_TIMEOUT_SECONDS = 45
-LLM_RETRY_ATTEMPTS = 3
-BLOCKED_ACTIONS = {"request_rollback"}
+LLM_RETRY_ATTEMPTS   = 3
+BLOCKED_ACTIONS      = {"request_rollback"}
 DRIFT_ALLOWED_COMPONENT_HINTS = (
     "feature_store",
     "model_server",
@@ -86,7 +115,7 @@ INVESTIGATION_ACTIONS = ["inspect", "query_logs", "check_metrics", "compare_conf
 
 SYSTEM_PROMPT = textwrap.dedent(
     """
-    You are an autonomous MLOps incident response agent.
+    You are an autonomous MLOps incident response agent powered by Gemma 4.
 
     Your job is to investigate production ML incidents using only observations returned
     by the environment, then submit a diagnosis when there is enough evidence or when
@@ -132,7 +161,9 @@ SYSTEM_PROMPT = textwrap.dedent(
 ).strip()
 
 
+# ---------------------------------------------------------------------------
 # Data model
+# ---------------------------------------------------------------------------
 @dataclass
 class Obs:
     goal: str = ""
@@ -168,7 +199,9 @@ def _to_obs(d: dict) -> Obs:
     )
 
 
+# ---------------------------------------------------------------------------
 # HTTP client
+# ---------------------------------------------------------------------------
 class DirectEnv:
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
@@ -249,7 +282,9 @@ def create_completion_with_retry(
     raise RuntimeError("LLM retry loop exited unexpectedly") from last_error
 
 
+# ---------------------------------------------------------------------------
 # Prompting
+# ---------------------------------------------------------------------------
 def build_user_prompt(
     obs: Obs,
     history: List[str],
@@ -337,7 +372,9 @@ def compact_text(value: str, limit: int) -> str:
     return value[:limit] + " ...[truncated]"
 
 
+# ---------------------------------------------------------------------------
 # Action parsing and normalization
+# ---------------------------------------------------------------------------
 def parse_action(text: str, valid_components: Sequence[str]) -> Optional[Tuple[str, str, dict]]:
     obj = _extract_json_object(text)
     if not obj:
@@ -412,21 +449,21 @@ def _extract_json_object(text: str) -> Optional[dict]:
 def normalize_action(action_type: str) -> str:
     compact = _norm(action_type).replace(" ", "")
     aliases = {
-        "inspect": "inspect",
-        "querylogs": "query_logs",
-        "querylog": "query_logs",
-        "checklogs": "query_logs",
-        "checkmetrics": "check_metrics",
-        "metrics": "check_metrics",
-        "compareconfigs": "compare_configs",
-        "compareconfig": "compare_configs",
-        "configdiff": "compare_configs",
-        "checkfeaturedrift": "check_feature_drift",
-        "featuredrift": "check_feature_drift",
-        "submitdiagnosis": "submit_diagnosis",
-        "diagnose": "submit_diagnosis",
-        "requestrollback": "request_rollback",
-        "rollback": "request_rollback",
+        "inspect":             "inspect",
+        "querylogs":           "query_logs",
+        "querylog":            "query_logs",
+        "checklogs":           "query_logs",
+        "checkmetrics":        "check_metrics",
+        "metrics":             "check_metrics",
+        "compareconfigs":      "compare_configs",
+        "compareconfig":       "compare_configs",
+        "configdiff":          "compare_configs",
+        "checkfeaturedrift":   "check_feature_drift",
+        "featuredrift":        "check_feature_drift",
+        "submitdiagnosis":     "submit_diagnosis",
+        "diagnose":            "submit_diagnosis",
+        "requestrollback":     "request_rollback",
+        "rollback":            "request_rollback",
     }
     return aliases.get(compact, action_type.lower().replace("-", "_").replace(" ", "_"))
 
@@ -729,7 +766,9 @@ def _infer_latency_target(
     )[0]
 
 
+# ---------------------------------------------------------------------------
 # Fallback and loop guard
+# ---------------------------------------------------------------------------
 def fallback_action(
     obs: Obs,
     valid_components: Sequence[str],
@@ -881,8 +920,8 @@ def _extract_value(text: str, pattern: str, group: int = 1) -> str:
 
 def _extract_data_quality_field(text: str) -> str:
     patterns = [
-        r"field\s*['\"]?([a-zA-Z0-9_]+)['\"]?",
-        r"for\s+['\"]?([a-zA-Z0-9_]+)['\"]?",
+        r"field\s*['\""]?([a-zA-Z0-9_]+)['\""]?",
+        r"for\s+['\""]?([a-zA-Z0-9_]+)['\""]?",
         r"missing\s+([a-zA-Z0-9_]+)",
         r"corrupted\s+([a-zA-Z0-9_]+)",
     ]
@@ -1075,7 +1114,7 @@ def best_evidence_target(obs: Obs, valid_components: Sequence[str], history: Lis
 def fallback_candidates(obs: Obs, valid_components: Sequence[str]) -> List[Tuple[str, str]]:
     components = prioritized_components(obs, valid_components)
     kind = incident_kind(obs)
-    evidence_text = _norm(f"{obs.goal} {obs.alert_summary} {obs.action_feedback}")
+    evidence_text_val = _norm(f"{obs.goal} {obs.alert_summary} {obs.action_feedback}")
     candidates: List[Tuple[str, str]] = []
 
     if kind == "data_quality":
@@ -1140,7 +1179,7 @@ def fallback_candidates(obs: Obs, valid_components: Sequence[str]) -> List[Tuple
         candidates.append(("query_logs", component))
         candidates.append(("check_metrics", component))
 
-    if any(term in evidence_text for term in ["deploy", "config", "change", "rollback", "migration"]):
+    if any(term in evidence_text_val for term in ["deploy", "config", "change", "rollback", "migration"]):
         for component in components:
             candidates.append(("compare_configs", component))
 
@@ -1196,10 +1235,22 @@ def chat_message(role: str, content: str) -> ChatCompletionMessageParam:
 
 
 def messages_for_model(messages: List[ChatCompletionMessageParam]) -> List[ChatCompletionMessageParam]:
-    """Keep local message memory, but send a compact request to small-context models."""
+    """
+    Gemma 4 has 128k context window — send more history than the old Llama 3.1 8B setup.
+    Strategy: always include the system prompt + last 5 turns (system + 5 user/assistant pairs).
+    For Ollama (gemma3:4b) with smaller RAM, cap at system + last 2 turns to be safe.
+    """
     if not messages:
         return []
-    return [messages[0], messages[-1]]
+
+    if BACKEND == "ollama":
+        # gemma3:4b on CPU/small GPU — keep context tight
+        return [messages[0]] + messages[-2:]
+
+    # HF Inference (gemma-3-4b-it / gemma-3-27b-it) — 128k context, send more history
+    if len(messages) <= 8:
+        return messages
+    return [messages[0]] + messages[-7:]
 
 
 def _append_oracle_trace(
@@ -1232,7 +1283,9 @@ def _append_oracle_trace(
     print(f"[TRACE] oracle trace appended → {path}", flush=True)
 
 
+# ---------------------------------------------------------------------------
 # Task runner
+# ---------------------------------------------------------------------------
 def run_task(
     llm: OpenAI,
     env: DirectEnv,
@@ -1249,7 +1302,7 @@ def run_task(
     messages: List[ChatCompletionMessageParam] = [chat_message("system", SYSTEM_PROMPT)]
     last_submit: Optional[Dict[str, Any]] = None
 
-    print(f"[START] task={task_id} env={ENV_NAME} model={MODEL_NAME}", flush=True)
+    print(f"[START] task={task_id} env={ENV_NAME} model={MODEL_NAME} backend={BACKEND}", flush=True)
 
     try:
         obs = env.reset(task_id=task_id)
@@ -1395,17 +1448,25 @@ def run_task(
     return {"task_id": task_id, "final_score": final_score, "score_breakdown": obs.score_breakdown}
 
 
+# ---------------------------------------------------------------------------
 # Entry point
+# ---------------------------------------------------------------------------
 def main() -> None:
     if not API_KEY:
-        print("# WARNING: No API key set", flush=True)
+        print(f"# WARNING: No API key set for backend={BACKEND}", flush=True)
+        if BACKEND == "hf":
+            print("# Set HF_TOKEN=hf_... in your .env file", flush=True)
+        elif BACKEND == "ollama":
+            print("# Ollama does not require an API key — proceeding.", flush=True)
 
     env = DirectEnv(base_url=HF_SPACE_URL)
     if not env.health():
         print(f"# WARNING: Cannot reach {HF_SPACE_URL}", flush=True)
 
-    print(f"# Server: {HF_SPACE_URL}", flush=True)
-    print(f"# Model:  {MODEL_NAME}", flush=True)
+    print(f"# Backend:     {BACKEND}", flush=True)
+    print(f"# Server:      {HF_SPACE_URL}", flush=True)
+    print(f"# Model:       {MODEL_NAME}", flush=True)
+    print(f"# API Base:    {API_BASE_URL}", flush=True)
     print(f"# Temperature: {TEMPERATURE}", flush=True)
     if ORACLE_TRACE_PATH:
         print(
@@ -1425,13 +1486,19 @@ def main() -> None:
         results.append(run_task(llm, env, task_id, trace_path=trace_path))
 
     print(f"\n# {'=' * 58}", flush=True)
-    print("# LLM AGENT RESULTS", flush=True)
+    print("# SENTINELAI — GEMMA 4 AGENT RESULTS", flush=True)
     print(f"# {'=' * 58}", flush=True)
     total = 0.0
-    for result in results:
-        print(f"#  {result['task_id']:<10} score: {result['final_score']:.4f}", flush=True)
-        total += result["final_score"]
-    print(f"#  {'AVERAGE':<10} score: {total / len(results):.4f}", flush=True)
+    for r in results:
+        score = r.get("final_score", 0.0)
+        total += score
+        breakdown = r.get("score_breakdown") or {}
+        bd_str = " | ".join(f"{k}={v:.3f}" for k, v in breakdown.items()) if breakdown else "n/a"
+        print(f"#   {r['task_id']:10s}  score={score:.4f}  [{bd_str}]", flush=True)
+    avg = total / len(results) if results else 0.0
+    print(f"# {'=' * 58}", flush=True)
+    print(f"#   AVERAGE SCORE: {avg:.4f}", flush=True)
+    print(f"# {'=' * 58}", flush=True)
 
 
 if __name__ == "__main__":
