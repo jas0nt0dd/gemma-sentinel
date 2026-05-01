@@ -22,8 +22,7 @@ SPACE_URL      = os.getenv("HF_SPACE_URL", "https://jason9150-mlops-incident-env
 
 # Uses Gemma 4 via Google's own API
 API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
-MODEL_ID     = "gemma-4-e4b-it"
-
+MODEL_ID      = os.getenv("MODEL_ID", "gemma-4-26b-a4b-it")
 # --- Task metadata ---
 TASK_META = {
     "easy": {
