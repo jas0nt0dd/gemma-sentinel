@@ -66,16 +66,22 @@ TASK_META = {
 }
 
 SYS_PROMPT = """You are SentinelAI, an autonomous MLOps incident response agent.
-You diagnose production AI/ML system failures from component status and evidence.
+You diagnose production AI/ML system failures from logs, metrics, and config evidence.
 
-Rules:
-- Identify components in degraded, error, warning, or critical states.
-- Weigh log evidence, metric spikes, config changes, and feature drift signals.
-- For cascade failures, find the upstream root that explains all downstream symptoms.
-- target must exactly match a component name from COMPONENT STATUS.
+STRICT OUTPUT RULES:
+- Do NOT use <thought>, <think>, or any XML tags
+- Do NOT explain your reasoning
+- Output ONLY a single line of raw JSON, nothing else
+- JSON must have exactly these keys: target, root_cause, fix
 
-Output ONLY this single-line JSON (no markdown, no extra text):
-{"target":"<exact_component_name>","root_cause":"<one sentence>","fix":"<one sentence>"}"""
+DIAGNOSIS RULES:
+- target must exactly match a component name from COMPONENT STATUS
+- For cascade failures identify the upstream root cause
+- root_cause must be specific (mention config param, schema field, PSI value, model age)
+- fix must be a concrete action (rollback, restart, retrain, revert config)
+
+OUTPUT FORMAT (copy exactly, fill in values):
+{"target":"COMPONENT_NAME","root_cause":"SPECIFIC_CAUSE","fix":"CONCRETE_ACTION"}"""
 
 
 # --- Environment helpers ---
@@ -104,12 +110,36 @@ def env_health():
         return False
 
 def parse_json_from_text(text):
-    try:
-        m = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    # Step 1: strip thought blocks — extract text AFTER </thought>
+    if "</thought>" in text:
+        text = text.split("</thought>")[-1].strip()
+    elif "<thought>" in text:
+        # thought never closed — try to extract component names from inside it
+        thought = text.split("<thought>")[-1]
+        # look for JSON inside thought block too
+        m = re.search(r'\{[^{}]*"target"[^{}]*\}', thought, re.DOTALL)
         if m:
+            try:
+                return json.loads(m.group())
+            except Exception:
+                pass
+        return None  # let fallback handle it
+
+    # Step 2: find JSON object with "target" key
+    m = re.search(r'\{[^{}]*"target"[^{}]*\}', text, re.DOTALL)
+    if m:
+        try:
             return json.loads(m.group())
-    except Exception:
-        pass
+        except Exception:
+            pass
+
+    # Step 3: broader search
+    m = re.search(r'\{.*?\}', text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group())
+        except Exception:
+            pass
     return None
 
 
@@ -208,7 +238,8 @@ def run_sentinel(task_id):
                 {"role": "user",   "content": user_msg},
             ],
             max_tokens=256,
-            temperature=0.2,
+            temperature=0.1,
+            extra_body={"thinking": {"type": "disabled"}},
             stream=True,
         )
 
