@@ -3,9 +3,8 @@ SentinelAI — Gradio Demo App
 Gemma 4 Good Hackathon | Global Resilience Impact Track
 
 Env vars (set as HF Space secrets):
-  HF_TOKEN        Your HuggingFace token (Inference API access)
+  GOOGLE_API_KEY  Your Google AI Studio API key (free at aistudio.google.com)
   HF_SPACE_URL    MLOps Incident env Space URL
-  MODEL_ID        Override model (default: google/gemma-4-E4B-it)
 """
 
 import json
@@ -15,12 +14,15 @@ import time
 
 import gradio as gr
 import requests
-from huggingface_hub import InferenceClient
+from openai import OpenAI
 
 # --- Config ---
-HF_TOKEN  = os.getenv("HF_TOKEN", "")
-SPACE_URL = os.getenv("HF_SPACE_URL", "https://jason9150-mlops-incident-env.hf.space").rstrip("/")
-MODEL_ID  = os.getenv("MODEL_ID", "google/gemma-4-E4B-it")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+SPACE_URL      = os.getenv("HF_SPACE_URL", "https://jason9150-mlops-incident-env.hf.space").rstrip("/")
+
+# Uses Gemma 4 via Google's own API
+API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+MODEL_ID     = "gemma-4-e4b-it"
 
 # --- Task metadata ---
 TASK_META = {
@@ -120,8 +122,8 @@ def run_sentinel(task_id):
     status    = "Starting..."
 
     def emit():
-        log_text  = "\n".join(log_lines)
-        diag_text = json.dumps(diagnosis, indent=2) if diagnosis else ""
+        log_text   = "\n".join(log_lines)
+        diag_text  = json.dumps(diagnosis, indent=2) if diagnosis else ""
         score_html = _score_badge(score) if diagnosis else ""
         return log_text, diag_text, score_html, status
 
@@ -134,7 +136,7 @@ def run_sentinel(task_id):
         yield emit()
         return
     log_lines.append("Environment online: " + SPACE_URL)
-    log_lines.append("Model: " + MODEL_ID)
+    log_lines.append("Model: " + MODEL_ID + " (Google AI Studio)")
 
     # Step 2: reset scenario
     status = "Resetting scenario..."
@@ -176,8 +178,8 @@ def run_sentinel(task_id):
         time.sleep(0.1)
         yield emit()
 
-    # Step 4: call Gemma 4
-    status = "Gemma 4 reasoning..."
+    # Step 4: call Gemma 4 via Google AI Studio
+    status = "Gemma 4 reasoning (Google AI Studio)..."
     yield emit()
 
     status_lines  = "\n".join("- " + k + ": " + v for k, v in comp_st.items())[:900]
@@ -192,33 +194,41 @@ def run_sentinel(task_id):
 
     raw_output = ""
     try:
-        if not HF_TOKEN:
-            raise ValueError("HF_TOKEN not set as a Space secret.")
+        if not GOOGLE_API_KEY:
+            raise ValueError("GOOGLE_API_KEY not set as a Space secret.")
 
-        client = InferenceClient(
-            model=MODEL_ID,
-            token=HF_TOKEN,
-            provider="auto",   # auto-picks correct provider for Gemma 4
+        client = OpenAI(
+            api_key=GOOGLE_API_KEY,
+            base_url=API_BASE_URL,
         )
-        messages = [{"role": "user", "content": SYS_PROMPT + "\n\n" + user_msg}]
 
-        for chunk in client.chat_completion(
-            messages=messages,
+        response = client.chat.completions.create(
+            model=MODEL_ID,
+            messages=[
+                {"role": "system", "content": SYS_PROMPT},
+                {"role": "user",   "content": user_msg},
+            ],
             max_tokens=256,
             temperature=0.2,
             stream=True,
-        ):
+        )
+
+        for chunk in response:
             delta = chunk.choices[0].delta.content or ""
             raw_output += delta
-            yield emit()
+        yield emit()
 
     except Exception as e:
         err = str(e)
         status = "Gemma 4 call failed."
-        log_lines += ["", "ERROR calling " + MODEL_ID + ": " + err, "", "TROUBLESHOOT:"]
-        log_lines.append("  1. Accept license at huggingface.co/" + MODEL_ID)
-        log_lines.append("  2. Enable a provider at hf.co/settings/inference-providers")
-        log_lines.append("  3. Fallback model: set MODEL_ID=google/gemma-4-E2B-it in Space secrets")
+        log_lines += [
+            "",
+            "ERROR calling Google AI Studio: " + err,
+            "",
+            "TROUBLESHOOT:",
+            "  1. Set GOOGLE_API_KEY in Space secrets (aistudio.google.com/apikey)",
+            "  2. Make sure the key has Gemma 4 access enabled",
+        ]
         yield emit()
         return
 
@@ -237,9 +247,9 @@ def run_sentinel(task_id):
         )
         if fallback_target:
             parsed = {
-                "target": fallback_target,
+                "target":     fallback_target,
                 "root_cause": "Highest severity component identified by fallback heuristic.",
-                "fix": "Investigate " + fallback_target + " logs and metrics."
+                "fix":        "Investigate " + fallback_target + " logs and metrics.",
             }
             log_lines.append("Fallback target: " + fallback_target)
         else:
@@ -275,7 +285,7 @@ def run_sentinel(task_id):
 
 
 def _score_badge(score):
-    if score >= 0.9:  color, label = "#22c55e", "EXCELLENT"
+    if score >= 0.9:   color, label = "#22c55e", "EXCELLENT"
     elif score >= 0.7: color, label = "#84cc16", "GOOD"
     elif score >= 0.4: color, label = "#f59e0b", "PARTIAL"
     elif score > 0.0:  color, label = "#ef4444", "LOW"
@@ -290,10 +300,10 @@ def _score_badge(score):
 
 def _status_from_score(score):
     if score >= 0.9:   return "Perfect diagnosis! Gemma 4 nailed it. 🎉"
-    elif score >= 0.7: return "Good diagnosis - correct root identified."
-    elif score >= 0.4: return "Partial credit - partially correct."
-    elif score > 0.0:  return "Low score - wrong component targeted."
-    else:              return "Miss - incorrect diagnosis."
+    elif score >= 0.7: return "Good diagnosis — correct root identified."
+    elif score >= 0.4: return "Partial credit — partially correct."
+    elif score > 0.0:  return "Low score — wrong component targeted."
+    else:              return "Miss — incorrect diagnosis."
 
 
 # --- Gradio UI ---
@@ -327,7 +337,7 @@ with gr.Blocks(
     gr.HTML("""
     <div class="sentinel-header">
         <h1>🛡️ SentinelAI</h1>
-        <p>Autonomous MLOps Incident Response &middot; Powered by <strong>Gemma 4</strong> &middot; Gemma 4 Good Hackathon 2026</p>
+        <p>Autonomous MLOps Incident Response &middot; Powered by <strong>Gemma 4</strong> via Google AI Studio &middot; Gemma 4 Good Hackathon 2026</p>
     </div>
     """)
 
@@ -352,7 +362,7 @@ with gr.Blocks(
 4. Outputs structured JSON diagnosis
 5. Real score returned from environment
 
-**Model:** `google/gemma-4-E4B-it`
+**Model:** `gemma-4-e4b-it` (Google AI Studio)
 **Env:** [MLOps Incident OpenEnv](https://huggingface.co/spaces/jason9150/mlops-incident-env)
 """)
 
@@ -382,10 +392,10 @@ with gr.Blocks(
 ### Scenario Guide
 | Scenario | Difficulty | Root cause location |
 |---|---|---|
-| Easy - Data Quality | Beginner | `data_pipeline_a` schema change |
-| Medium - Latency Spike | Intermediate | `feature_preprocessor_v2` config |
-| Hard - Silent Drift | Advanced | `feature_store` PSI spike |
-| Cascade - Multi-Failure | Expert | `embedding_service_v3` upstream |
+| Easy — Data Quality | Beginner | `data_pipeline_a` schema change |
+| Medium — Latency Spike | Intermediate | `feature_preprocessor_v2` config |
+| Hard — Silent Drift | Advanced | `feature_store` PSI spike |
+| Cascade — Multi-Failure | Expert | `embedding_service_v3` upstream |
 """)
 
     def update_desc(task_id):
