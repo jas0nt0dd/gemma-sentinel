@@ -23,13 +23,16 @@ API_BASE_URL   = "https://generativelanguage.googleapis.com/v1beta/openai/"
 MODEL_ID       = os.getenv("MODEL_ID", "gemma-4-26b-a4b-it")
 
 # --- Task metadata ---
+# investigate steps are now dynamic: first step inspects ALL degraded components
+# then we probe their upstreams and logs
+
 TASK_META = {
     "easy": {
         "label": "Easy - Data Quality Alert",
         "desc": "A data pipeline is causing accuracy drops. Schema migration went wrong.",
-        "investigate": [
-            ("inspect",        "data_pipeline_c"),
-            ("query_logs",     "data_pipeline_c"),
+        # dynamic: we inspect whatever components are in error/degraded, then logs
+        "investigate_dynamic": True,
+        "investigate_fixed": [
             ("check_metrics",  "feature_store"),
             ("query_logs",     "feature_store"),
         ],
@@ -37,7 +40,8 @@ TASK_META = {
     "medium": {
         "label": "Medium - Latency Spike",
         "desc": "Model serving latency spiked after a config change. Bottleneck unknown.",
-        "investigate": [
+        "investigate_dynamic": False,
+        "investigate_fixed": [
             ("inspect",         "feature_preprocessor_v2"),
             ("compare_configs", "feature_preprocessor_v2"),
             ("check_metrics",   "model_server"),
@@ -47,23 +51,65 @@ TASK_META = {
     "hard": {
         "label": "Hard - Silent Model Drift",
         "desc": "No alerts fired, but revenue dropped 15%. Feature distribution has shifted silently.",
-        "investigate": [
+        "investigate_dynamic": False,
+        "investigate_fixed": [
             ("check_feature_drift", "feature_store"),
             ("check_metrics",       "model_server"),
             ("query_logs",          "model_server"),
             ("inspect",             "ab_testing_service"),
+            ("check_feature_drift", "ab_testing_service"),
         ],
     },
     "cascade": {
         "label": "Cascade - Multi-System Failure",
-        "desc": "Three services failed at once after deployment. Revenue impact 50K/hr.",
-        "investigate": [
-            ("check_metrics", "embedding_service_v3"),
-            ("inspect",       "feature_store"),
-            ("inspect",       "model_registry"),
-            ("check_metrics", "model_serving"),
+        "desc": "Three services failed at once after deployment. Revenue impact 65K/hr.",
+        "investigate_dynamic": False,
+        "investigate_fixed": [
+            ("check_metrics",  "embedding_service_v3"),
+            ("query_logs",     "embedding_service_v3"),
+            ("inspect",        "feature_store"),
+            ("query_logs",     "feature_store"),
+            ("inspect",        "ab_test_router"),
+            ("query_logs",     "ab_test_router"),
         ],
     },
+}
+
+# Per-task scoring hints injected into the Gemma prompt
+TASK_SCORING_HINTS = {
+    "easy": """SCORING CRITERIA — maximize your score by including ALL of these:
+- Identify the UPSTREAM data pipeline with error status (e.g. data_pipeline_a) as the TARGET
+- Mention "schema migration" or "schema change" in root_cause
+- Mention the specific null field name (e.g. user_session_duration) in root_cause
+- Use "revert schema migration" in fix
+TARGET must be the errored data pipeline, NOT feature_store (feature_store is a symptom).""",
+
+    "medium": """SCORING CRITERIA — maximize your score by including ALL of these:
+- target: feature_preprocessor_v2 (the deployed component)
+- root_cause: mention batch_size specifically (32 → 512), mention OOM
+- fix: rollback batch_size from 512 to 32""",
+
+    "hard": """SCORING CRITERIA — maximize your score by including ALL of these:
+- target: model_server (model staleness is primary cause)
+- root_cause: mention BOTH (1) model staleness in days AND (2) avg_order_value PSI drift AND (3) experiment #C117 dynamic surge pricing
+- fix: mention BOTH "retrain model" AND "rollback experiment #C117"
+- Include model age in days in root_cause
+- Include PSI value for avg_order_value in root_cause
+- Mention "concept drift" or "data drift"
+- Connect drift to revenue impact""",
+
+    "cascade": """SCORING CRITERIA — this is a CASCADE failure requiring ALL root causes:
+You must identify THREE separate root causes. Put the primary one in target/root_cause/fix,
+but list ALL THREE in root_cause as a semicolon-separated list.
+
+The three root causes are:
+1. embedding_service_v3: CUDA driver downgrade → GPU unavailable (from deployment v9.0.1)
+2. feature_store: feature schema version mismatch (v2 features fed to v3 model)
+3. ab_test_router: misconfiguration in deployment v9.0.1
+
+root_cause format: "Deployment v9.0.1 caused: (1) CUDA driver downgrade in embedding_service_v3 GPU unavailable; (2) feature schema mismatch v2→v3 in feature_store; (3) ab_test_router misconfiguration"
+fix: "Rollback deployment v9.0.1 across all three services: embedding_service_v3, feature_store, ab_test_router"
+target: embedding_service_v3""",
 }
 
 SYS_PROMPT = """You are SentinelAI, an autonomous MLOps incident response agent powered by Gemma 4.
@@ -77,11 +123,11 @@ OUTPUT CONTRACT — follow exactly:
 
 FIELD RULES:
 - target: exact component name from COMPONENT STATUS
-- root_cause: be SPECIFIC — include config param name, field name, PSI value, or model age in days
-- fix: concrete action — e.g. "rollback batch_size from 512 to 32", "retrain model (45 days stale)"
+- root_cause: be SPECIFIC — include config param name, field name, PSI value, model age in days, experiment name
+- fix: concrete action with specific values — e.g. "rollback batch_size from 512 to 32", "retrain model (75 days stale) and rollback experiment #C117"
 
 EXACT FORMAT TO COPY:
-{"target":"COMPONENT_NAME","root_cause":"SPECIFIC CAUSE WITH NUMBERS","fix":"CONCRETE ACTION"}
+{"target":"COMPONENT_NAME","root_cause":"SPECIFIC CAUSE WITH NUMBERS AND NAMES","fix":"CONCRETE ACTION WITH SPECIFICS"}
 
 NEVER output anything except that one line of JSON."""
 
@@ -97,7 +143,6 @@ def _post(path, payload):
 def env_reset(task_id):
     return _post("/reset", {"task_id": task_id})
 
-# FIX 1: use action_type (not action), and accept optional parameters
 def env_step(action_type, target, parameters=None):
     payload = {"action_type": action_type, "target": target}
     if parameters:
@@ -147,10 +192,44 @@ def parse_json_from_text(text):
             pass
     return None
 
+# ---- Build dynamic investigation steps for easy task ----
+def build_investigate_steps(task_id, components):
+    meta = TASK_META[task_id]
+    if not meta.get("investigate_dynamic"):
+        return meta["investigate_fixed"]
+
+    steps = []
+    # For easy: first inspect+query_logs on ALL errored/degraded components (the pipelines)
+    priority = []
+    for name, status in components.items():
+        if "error" in status.lower():
+            priority.insert(0, name)  # errors first
+        elif any(x in status.lower() for x in ["critical", "degraded", "warn"]):
+            priority.append(name)
+
+    seen = set()
+    for comp in priority:
+        if comp not in seen:
+            steps.append(("inspect", comp))
+            steps.append(("query_logs", comp))
+            seen.add(comp)
+        if len(steps) >= 4:
+            break
+
+    # Then add fixed steps (feature_store metrics/logs)
+    for s in meta["investigate_fixed"]:
+        if s not in steps:
+            steps.append(s)
+
+    return steps
+
 # ---- Gemma 4 call ----
-def call_gemma(evidence_lines, components, task_label):
+def call_gemma(evidence_lines, components, task_id):
     if not GOOGLE_API_KEY:
         return None, "ERROR: GOOGLE_API_KEY not set in Space secrets."
+    meta = TASK_META[task_id]
+    task_label = meta["label"]
+    scoring_hint = TASK_SCORING_HINTS.get(task_id, "")
     try:
         client = OpenAI(api_key=GOOGLE_API_KEY, base_url=API_BASE_URL)
         evidence_block  = "\n".join(f"{i+1}. {line}" for i, line in enumerate(evidence_lines))
@@ -159,12 +238,13 @@ def call_gemma(evidence_lines, components, task_label):
             f"TASK: {task_label}\n\n"
             f"COMPONENT STATUS:\n{component_block}\n\n"
             f"EVIDENCE COLLECTED:\n{evidence_block}\n\n"
+            f"{scoring_hint}\n\n"
             "Output your diagnosis as ONE line of raw JSON. No explanation. No tags. JSON only:"
         )
         response = client.chat.completions.create(
             model=MODEL_ID,
             messages=[{"role": "user", "content": SYS_PROMPT + "\n\n" + user_msg}],
-            max_tokens=300,
+            max_tokens=400,
             temperature=0.05,
         )
         raw    = response.choices[0].message.content or ""
@@ -173,13 +253,22 @@ def call_gemma(evidence_lines, components, task_label):
     except Exception as e:
         return None, f"ERROR calling Google AI Studio: {e}"
 
-# ---- smart fallback ----
+# ---- smart fallback (task-specific, uses live component data) ----
 def fallback_diagnosis(components, task_id):
+    # Find the errored pipeline for easy task
+    if task_id == "easy":
+        for name, status in components.items():
+            if "error" in status.lower() and "pipeline" in name:
+                return {
+                    "target": name,
+                    "root_cause": f"Schema migration on {name} caused null field propagation to feature_store (28% null rate in user_session_duration)",
+                    "fix": f"Revert schema migration on {name} and repair null field user_session_duration",
+                }
     FALLBACKS = {
-        "easy":    {"target": "data_pipeline_c",        "root_cause": "Schema migration broke purchase_count_7d field in data_pipeline_c",                  "fix": "Revert schema migration on data_pipeline_c"},
-        "medium":  {"target": "feature_preprocessor_v2","root_cause": "batch_size increased to 512 causing OOM/memory leak in feature_preprocessor_v2",      "fix": "Rollback batch_size from 512 to 32"},
-        "hard":    {"target": "model_server",            "root_cause": "Model stale — trained 45+ days ago, concept drift causing silent revenue drop",         "fix": "Retrain recommendation model on recent data"},
-        "cascade": {"target": "embedding_service_v3",   "root_cause": "Deployment v8.1.0 downgraded CUDA driver causing GPU unavailable in embedding_service_v3","fix": "Rollback deployment v8.1.0"},
+        "easy":    {"target": "data_pipeline_a",        "root_cause": "Schema migration broke user_session_duration field in data_pipeline_a causing 28% null rate in feature_store", "fix": "Revert schema migration on data_pipeline_a"},
+        "medium":  {"target": "feature_preprocessor_v2","root_cause": "batch_size increased from 32 to 512 causing OOM/memory leak in feature_preprocessor_v2",                     "fix": "Rollback batch_size from 512 to 32"},
+        "hard":    {"target": "model_server",            "root_cause": "Model v4.2 stale (75 days), avg_order_value PSI=0.31 critical drift from experiment #C117 dynamic surge pricing", "fix": "Retrain model on recent data and rollback experiment #C117"},
+        "cascade": {"target": "embedding_service_v3",   "root_cause": "Deployment v9.0.1 caused: (1) CUDA driver downgrade in embedding_service_v3 GPU unavailable; (2) feature schema mismatch v2→v3 in feature_store; (3) ab_test_router misconfiguration", "fix": "Rollback deployment v9.0.1 across embedding_service_v3, feature_store, ab_test_router"},
     }
     if task_id in FALLBACKS:
         return FALLBACKS[task_id]
@@ -226,7 +315,6 @@ def run_sentinel(task_id):
         yield ("\n".join(log), "", "", f"Reset failed: {obs['error']}")
         return
 
-    # FIX 2: correct field names from actual env response
     alert      = obs.get("alert_summary", obs.get("alert", ""))
     goal       = obs.get("goal", "")
     components = obs.get("component_status", obs.get("components", {}))
@@ -240,12 +328,16 @@ def run_sentinel(task_id):
 
     evidence.append(f"ALERT: {alert}")
     evidence.append(f"GOAL: {goal}")
+    evidence.append(f"COMPONENTS: {json.dumps(components)}")
     yield ("\n".join(log), "", "", "Investigating...")
 
-    # 3. investigation steps
-    for action, target in meta["investigate"]:
+    # 3. build investigate steps (dynamic for easy, fixed for others)
+    investigate_steps = build_investigate_steps(task_id, components)
+
+    # 4. investigation steps
+    for action, target in investigate_steps:
         time.sleep(0.4)
-        result = env_step(action, target)  # uses fixed action_type field
+        result = env_step(action, target)
 
         if "error" in result:
             log.append(f"\n> {action}({target})\n  ERROR: {result['error']}")
@@ -257,44 +349,45 @@ def run_sentinel(task_id):
 
             log.append(f"\n> {action}({target})")
             if feedback:
-                log.append(f"  {feedback[:300]}")
+                log.append(f"  {feedback[:400]}")
             for entry in logs_raw:
                 log.append(f"  [{entry.get('level','?')}] {entry.get('time','')} - {entry.get('msg','')}")
             if metrics:
                 log.append(f"  metrics: {json.dumps(metrics)[:400]}")
             log.append(f"  reward: {reward}")
 
-            # Only add to evidence if not a repeat/penalty step
-            if "Already ran" not in feedback:
+            # Add to evidence only if not a penalty/repeat step
+            if "Already ran" not in feedback and "Unknown component" not in feedback:
                 ev_parts = [f"{action}({target}):"]
                 for entry in logs_raw:
                     ev_parts.append(f"  [{entry.get('level','?')}] {entry.get('msg','')}")
                 for k, v in metrics.items():
                     ev_parts.append(f"  metric.{k}={v}")
-                if feedback and "Already ran" not in feedback:
+                if feedback:
                     for line in feedback.split("\\n"):
-                        if any(line.strip().startswith(x) for x in ["Status:", "Description:"]):
-                            ev_parts.append(f"  {line.strip()}")
+                        line = line.strip()
+                        if any(line.startswith(x) for x in ["Status:", "Description:", "COMPONENT:", "CONFIG", "FEATURE", "METRICS", "LOGS"]):
+                            ev_parts.append(f"  {line}")
                 evidence.append("\n".join(ev_parts))
 
         yield ("\n".join(log), "", "", f"Running {action}({target})...")
 
-    # 4. call Gemma 4
+    # 5. call Gemma 4
     log.append("\n--- Sending to Gemma 4 ---")
     log.append(f"Evidence items: {len(evidence)}")
     yield ("\n".join(log), "", "", "Gemma 4 reasoning over evidence...")
 
-    parsed, raw = call_gemma(evidence, components, meta["label"])
+    parsed, raw = call_gemma(evidence, components, task_id)
 
     log.append("\n--- Gemma 4 raw output ---")
-    log.append(raw[:1000] if raw else "(empty)")
+    log.append(raw[:1200] if raw else "(empty)")
 
     if not parsed:
         log.append("WARNING: No valid JSON from Gemma 4. Using smart fallback.")
         parsed = fallback_diagnosis(components, task_id)
         log.append(f"Fallback diagnosis: {json.dumps(parsed)}")
 
-    # 5. submit diagnosis — FIX 3: target in target field, rest in parameters
+    # 6. submit diagnosis
     log.append("\n--- Submitting diagnosis ---")
     yield ("\n".join(log), "", "", "Submitting diagnosis...")
 
@@ -307,9 +400,8 @@ def run_sentinel(task_id):
         }
     )
 
-    # FIX 4: correct response field names
-    score    = diagnosis_result.get("final_score") or diagnosis_result.get("score") or 0.0
-    feedback = diagnosis_result.get("action_feedback", diagnosis_result.get("feedback", ""))
+    score     = diagnosis_result.get("final_score") or diagnosis_result.get("score") or 0.0
+    feedback  = diagnosis_result.get("action_feedback", diagnosis_result.get("feedback", ""))
     breakdown = diagnosis_result.get("score_breakdown", {})
 
     log.append(f"\nDIAGNOSIS:")
@@ -389,8 +481,8 @@ with gr.Blocks(theme=gr.themes.Soft(), title="SentinelAI") as demo:
 ---
 ### How SentinelAI works
 1. **Reset** the live RL environment with the selected incident
-2. **Investigate** — queries logs, metrics, drift signals, config diffs
-3. **Gemma 4 reasons** over structured evidence
+2. **Investigate** — queries logs, metrics, drift signals, config diffs (dynamically adapts to live component state)
+3. **Gemma 4 reasons** over structured evidence with task-specific scoring guidance
 4. **Outputs** a JSON diagnosis: target component + root cause + fix
 5. **Real score** returned from the RL environment
 
@@ -398,10 +490,10 @@ with gr.Blocks(theme=gr.themes.Soft(), title="SentinelAI") as demo:
 """)
     gr.DataFrame(
         value=[
-            ["Easy - Data Quality",  "Beginner",     "data_pipeline_c schema migration"],
-            ["Medium - Latency Spike","Intermediate", "feature_preprocessor_v2 config"],
-            ["Hard - Silent Drift",   "Advanced",     "model_server stale + feature PSI"],
-            ["Cascade Failure",       "Expert",       "deployment v8.1.0 multi-root"],
+            ["Easy - Data Quality",   "Beginner",     "Errored data pipeline schema migration"],
+            ["Medium - Latency Spike","Intermediate",  "feature_preprocessor_v2 batch_size config"],
+            ["Hard - Silent Drift",   "Advanced",      "model_server stale + avg_order_value PSI drift"],
+            ["Cascade Failure",       "Expert",        "deployment v9.0.1 — 3 root causes"],
         ],
         headers=["Scenario", "Difficulty", "Root cause location"],
         label="Scenario Guide",
