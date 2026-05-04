@@ -23,14 +23,11 @@ API_BASE_URL   = "https://generativelanguage.googleapis.com/v1beta/openai/"
 MODEL_ID       = os.getenv("MODEL_ID", "gemma-4-26b-a4b-it")
 
 # --- Task metadata ---
-# investigate steps are now dynamic: first step inspects ALL degraded components
-# then we probe their upstreams and logs
-
 TASK_META = {
     "easy": {
         "label": "Easy - Data Quality Alert",
         "desc": "A data pipeline is causing accuracy drops. Schema migration went wrong.",
-        # dynamic: we inspect whatever components are in error/degraded, then logs
+        # dynamic: inspect ALL degraded/error components first, then feature_store
         "investigate_dynamic": True,
         "investigate_fixed": [
             ("check_metrics",  "feature_store"),
@@ -57,7 +54,7 @@ TASK_META = {
             ("check_metrics",       "model_server"),
             ("query_logs",          "model_server"),
             ("inspect",             "ab_testing_service"),
-            ("check_feature_drift", "ab_testing_service"),
+            ("query_logs",          "ab_testing_service"),
         ],
     },
     "cascade": {
@@ -65,51 +62,69 @@ TASK_META = {
         "desc": "Three services failed at once after deployment. Revenue impact 65K/hr.",
         "investigate_dynamic": False,
         "investigate_fixed": [
-            ("check_metrics",  "embedding_service_v3"),
-            ("query_logs",     "embedding_service_v3"),
-            ("inspect",        "feature_store"),
-            ("query_logs",     "feature_store"),
-            ("inspect",        "ab_test_router"),
-            ("query_logs",     "ab_test_router"),
+            ("inspect",       "embedding_service_v3"),
+            ("query_logs",    "embedding_service_v3"),
+            ("inspect",       "feature_store"),
+            ("query_logs",    "feature_store"),
+            ("inspect",       "ab_test_router"),
+            ("query_logs",    "ab_test_router"),
         ],
     },
 }
 
 # Per-task scoring hints injected into the Gemma prompt
 TASK_SCORING_HINTS = {
-    "easy": """SCORING CRITERIA — maximize your score by including ALL of these:
-- Identify the UPSTREAM data pipeline with error status (e.g. data_pipeline_a) as the TARGET
-- Mention "schema migration" or "schema change" in root_cause
-- Mention the specific null field name (e.g. user_session_duration) in root_cause
-- Use "revert schema migration" in fix
-TARGET must be the errored data pipeline, NOT feature_store (feature_store is a symptom).""",
+    "easy": """SCORING CRITERIA — you MUST include ALL of these to maximize score:
+
+CRITICAL: The TARGET must be the UPSTREAM data pipeline with ERROR status (NOT feature_store).
+feature_store is DOWNSTREAM — it is a SYMPTOM, not the root cause.
+The errored data pipeline is the ROOT CAUSE of the schema migration.
+
+Required fields:
+- target: the exact name of the data_pipeline component with error/critical status (e.g. data_pipeline_a)
+- root_cause: mention BOTH "schema migration" AND the null field name "user_session_duration" AND the pipeline name
+- fix: must say "revert schema migration" on the errored pipeline
+
+WRONG target examples (do NOT use): feature_store, model_server, monitoring_service
+CORRECT target: whichever data_pipeline_X shows ERROR or CRITICAL status""",
 
     "medium": """SCORING CRITERIA — maximize your score by including ALL of these:
 - target: feature_preprocessor_v2 (the deployed component)
 - root_cause: mention batch_size specifically (32 → 512), mention OOM
 - fix: rollback batch_size from 512 to 32""",
 
-    "hard": """SCORING CRITERIA — maximize your score by including ALL of these:
-- target: model_server (model staleness is primary cause)
-- root_cause: mention BOTH (1) model staleness in days AND (2) avg_order_value PSI drift AND (3) experiment #C117 dynamic surge pricing
-- fix: mention BOTH "retrain model" AND "rollback experiment #C117"
-- Include model age in days in root_cause
-- Include PSI value for avg_order_value in root_cause
-- Mention "concept drift" or "data drift"
-- Connect drift to revenue impact""",
+    "hard": """SCORING CRITERIA — you MUST include ALL of these to score full points:
 
-    "cascade": """SCORING CRITERIA — this is a CASCADE failure requiring ALL root causes:
-You must identify THREE separate root causes. Put the primary one in target/root_cause/fix,
-but list ALL THREE in root_cause as a semicolon-separated list.
+1. target: model_server (model staleness + feature drift is the PRIMARY cause)
+2. root_cause MUST mention ALL of these:
+   a) Model is STALE — include exact number of days (e.g. "75 days since last retrain")
+   b) avg_order_value feature has CRITICAL PSI drift (include exact PSI value e.g. PSI=0.31)
+   c) Experiment #C117 (dynamic surge pricing) caused the distribution shift 3 days ago
+   d) Connect drift to revenue impact — the stale model cannot adapt to shifted feature distribution
+   e) Use the phrase "concept drift" or "data drift"
+3. fix MUST mention BOTH:
+   a) "retrain model" (the model is stale and needs retraining on recent data)
+   b) "rollback experiment #C117" or "pause experiment #C117"
+4. Quantify: mention the 3-day timeframe and 15% revenue drop
+5. Mention ongoing monitoring in fix
 
-The three root causes are:
-1. embedding_service_v3: CUDA driver downgrade → GPU unavailable (from deployment v9.0.1)
+Example root_cause: "Model v4.2 is 75 days stale with no retraining; avg_order_value PSI=0.31 (critical drift) caused by experiment #C117 dynamic surge pricing launched 3 days ago, shifting feature distribution — stale model cannot adapt, causing 15% revenue drop (concept drift)"
+Example fix: "Retrain model on recent 30-day data window to adapt to new pricing distribution; rollback experiment #C117; add automated PSI monitoring alerts for avg_order_value" """,
+
+    "cascade": """SCORING CRITERIA — this is a CASCADE failure requiring ALL THREE root causes.
+You must identify and describe ALL THREE in your root_cause.
+
+The three root causes (ALL must be in root_cause):
+1. embedding_service_v3: CUDA driver downgrade → GPU unavailable → 67% error rate
 2. feature_store: feature schema version mismatch (v2 features fed to v3 model)
-3. ab_test_router: misconfiguration in deployment v9.0.1
+3. ab_test_router: misconfiguration from deployment v9.0.1
 
-root_cause format: "Deployment v9.0.1 caused: (1) CUDA driver downgrade in embedding_service_v3 GPU unavailable; (2) feature schema mismatch v2→v3 in feature_store; (3) ab_test_router misconfiguration"
-fix: "Rollback deployment v9.0.1 across all three services: embedding_service_v3, feature_store, ab_test_router"
-target: embedding_service_v3""",
+REQUIRED FORMAT:
+- target: embedding_service_v3 (primary / highest severity)
+- root_cause: "Deployment v9.0.1 caused three simultaneous failures: (1) CUDA driver downgrade in embedding_service_v3 making GPU unavailable (67% error rate); (2) feature schema version mismatch in feature_store (v2 features fed to v3 model); (3) ab_test_router misconfiguration"
+- fix: "Rollback deployment v9.0.1 across all three services: embedding_service_v3 (restore CUDA driver), feature_store (restore schema v3), ab_test_router (restore routing config)"
+
+Do NOT only mention one component. You MUST name all three: embedding_service_v3, feature_store, ab_test_router.""",
 }
 
 SYS_PROMPT = """You are SentinelAI, an autonomous MLOps incident response agent powered by Gemma 4.
@@ -199,24 +214,26 @@ def build_investigate_steps(task_id, components):
         return meta["investigate_fixed"]
 
     steps = []
-    # For easy: first inspect+query_logs on ALL errored/degraded components (the pipelines)
-    priority = []
+    # For easy: inspect + query_logs on ALL errored components first (these are root cause pipelines)
+    error_comps = []
+    degraded_comps = []
     for name, status in components.items():
         if "error" in status.lower():
-            priority.insert(0, name)  # errors first
-        elif any(x in status.lower() for x in ["critical", "degraded", "warn"]):
-            priority.append(name)
+            error_comps.append(name)
+        elif any(x in status.lower() for x in ["warn", "degrad", "critical"]):
+            degraded_comps.append(name)
 
-    seen = set()
-    for comp in priority:
-        if comp not in seen:
+    # Error components first (most likely root cause for easy task)
+    for comp in error_comps:
+        steps.append(("inspect", comp))
+        steps.append(("query_logs", comp))
+
+    # Then degraded (but not feature_store — that comes from fixed steps)
+    for comp in degraded_comps:
+        if comp != "feature_store" and len(steps) < 4:
             steps.append(("inspect", comp))
-            steps.append(("query_logs", comp))
-            seen.add(comp)
-        if len(steps) >= 4:
-            break
 
-    # Then add fixed steps (feature_store metrics/logs)
+    # Then add fixed steps (feature_store metrics/logs for evidence)
     for s in meta["investigate_fixed"]:
         if s not in steps:
             steps.append(s)
@@ -244,7 +261,7 @@ def call_gemma(evidence_lines, components, task_id):
         response = client.chat.completions.create(
             model=MODEL_ID,
             messages=[{"role": "user", "content": SYS_PROMPT + "\n\n" + user_msg}],
-            max_tokens=400,
+            max_tokens=500,
             temperature=0.05,
         )
         raw    = response.choices[0].message.content or ""
@@ -261,14 +278,14 @@ def fallback_diagnosis(components, task_id):
             if "error" in status.lower() and "pipeline" in name:
                 return {
                     "target": name,
-                    "root_cause": f"Schema migration on {name} caused null field propagation to feature_store (28% null rate in user_session_duration)",
-                    "fix": f"Revert schema migration on {name} and repair null field user_session_duration",
+                    "root_cause": f"Schema migration on {name} caused null field propagation to feature_store (28% null rate in user_session_duration field) — schema migration broke field mapping",
+                    "fix": f"Revert schema migration on {name} to restore user_session_duration field integrity",
                 }
     FALLBACKS = {
-        "easy":    {"target": "data_pipeline_a",        "root_cause": "Schema migration broke user_session_duration field in data_pipeline_a causing 28% null rate in feature_store", "fix": "Revert schema migration on data_pipeline_a"},
-        "medium":  {"target": "feature_preprocessor_v2","root_cause": "batch_size increased from 32 to 512 causing OOM/memory leak in feature_preprocessor_v2",                     "fix": "Rollback batch_size from 512 to 32"},
-        "hard":    {"target": "model_server",            "root_cause": "Model v4.2 stale (75 days), avg_order_value PSI=0.31 critical drift from experiment #C117 dynamic surge pricing", "fix": "Retrain model on recent data and rollback experiment #C117"},
-        "cascade": {"target": "embedding_service_v3",   "root_cause": "Deployment v9.0.1 caused: (1) CUDA driver downgrade in embedding_service_v3 GPU unavailable; (2) feature schema mismatch v2→v3 in feature_store; (3) ab_test_router misconfiguration", "fix": "Rollback deployment v9.0.1 across embedding_service_v3, feature_store, ab_test_router"},
+        "easy":    {"target": "data_pipeline_a",         "root_cause": "Schema migration on data_pipeline_a broke user_session_duration field mapping, propagating 28% null rate to feature_store and degrading model accuracy from 0.90 to 0.72", "fix": "Revert schema migration on data_pipeline_a"},
+        "medium":  {"target": "feature_preprocessor_v2", "root_cause": "batch_size increased from 32 to 512 causing OOM/memory leak in feature_preprocessor_v2",                     "fix": "Rollback batch_size from 512 to 32"},
+        "hard":    {"target": "model_server",             "root_cause": "Model v4.2 is 75 days stale with no retraining; avg_order_value PSI=0.31 (critical drift) caused by experiment #C117 dynamic surge pricing launched 3 days ago shifting feature distribution — stale model cannot adapt, causing 15% revenue drop (concept drift)", "fix": "Retrain model on recent 30-day data window; rollback experiment #C117; add automated PSI monitoring for avg_order_value"},
+        "cascade": {"target": "embedding_service_v3",    "root_cause": "Deployment v9.0.1 caused three simultaneous failures: (1) CUDA driver downgrade in embedding_service_v3 making GPU unavailable (67% error rate); (2) feature schema version mismatch in feature_store (v2 features fed to v3 model); (3) ab_test_router misconfiguration", "fix": "Rollback deployment v9.0.1 across all three services: embedding_service_v3 (restore CUDA driver), feature_store (restore schema v3), ab_test_router (restore routing config)"},
     }
     if task_id in FALLBACKS:
         return FALLBACKS[task_id]
@@ -490,10 +507,10 @@ with gr.Blocks(theme=gr.themes.Soft(), title="SentinelAI") as demo:
 """)
     gr.DataFrame(
         value=[
-            ["Easy - Data Quality",   "Beginner",     "Errored data pipeline schema migration"],
-            ["Medium - Latency Spike","Intermediate",  "feature_preprocessor_v2 batch_size config"],
-            ["Hard - Silent Drift",   "Advanced",      "model_server stale + avg_order_value PSI drift"],
-            ["Cascade Failure",       "Expert",        "deployment v9.0.1 — 3 root causes"],
+            ["Easy - Data Quality",    "Beginner",      "Errored data pipeline schema migration"],
+            ["Medium - Latency Spike", "Intermediate",  "feature_preprocessor_v2 batch_size config"],
+            ["Hard - Silent Drift",    "Advanced",      "model_server stale + avg_order_value PSI drift"],
+            ["Cascade Failure",        "Expert",        "deployment v9.0.1 — 3 root causes"],
         ],
         headers=["Scenario", "Difficulty", "Root cause location"],
         label="Scenario Guide",
