@@ -116,7 +116,7 @@ def parse_json_from_text(text):
     if not text:
         return None
     # Strip thought/reasoning blocks
-    for open_tag, close_tag in [("<thought>", "</thought>"), ("<think>", "</think>"), ("<reasoning>", "</reasoning>")):
+    for open_tag, close_tag in [("<thought>", "</thought>"), ("<think>", "</think>"), ("<reasoning>", "</reasoning>")]:
         if close_tag in text:
             text = text.split(close_tag)[-1].strip()
             break
