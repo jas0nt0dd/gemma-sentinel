@@ -920,8 +920,8 @@ def _extract_value(text: str, pattern: str, group: int = 1) -> str:
 
 def _extract_data_quality_field(text: str) -> str:
     patterns = [
-        r"field\s*['\""]?([a-zA-Z0-9_]+)['\""]?",
-        r"for\s+['\""]?([a-zA-Z0-9_]+)['\""]?",
+        r"field\s*['\"]?([a-zA-Z0-9_]+)['\"]?",
+        r"for\s+['\"]?([a-zA-Z0-9_]+)['\"]?",
         r"missing\s+([a-zA-Z0-9_]+)",
         r"corrupted\s+([a-zA-Z0-9_]+)",
     ]
